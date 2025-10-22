@@ -1,0 +1,46 @@
+substitutions:
+  _REGION: "us-central1"
+  _AR_REPO: "apps"
+  _SERVICE: "video-verifier"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "build"
+      - "-t"
+      - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$SHORT_SHA"
+      - "."
+
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "push"
+      - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$SHORT_SHA"
+
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    entrypoint: gcloud
+    args:
+      - "run"
+      - "deploy"
+      - "${_SERVICE}"
+      - "--image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$SHORT_SHA"
+      - "--region=${_REGION}"
+      - "--platform=managed"
+      - "--no-allow-unauthenticated"
+      - "--port=8080"
+      - "--cpu=4"
+      - "--memory=8Gi"
+      - "--concurrency=80"
+      - "--timeout=300"
+      - "--max-instances=10"
+      - "--min-instances=0"
+      - "--execution-environment=gen2"
+      - "--service-account=streamlit-runtime@${PROJECT_ID}.iam.gserviceaccount.com"
+      - "--update-secrets=/app/.streamlit/secrets.toml=GG_VIDEO_STREAMLIT_SECRETS_TOML:latest"
+      - "--set-env-vars=STREAMLIT_SERVER_MAX_UPLOAD_SIZE=200"
+      - "--command="
+      - "--args="
+images:
+  - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$SHORT_SHA"
