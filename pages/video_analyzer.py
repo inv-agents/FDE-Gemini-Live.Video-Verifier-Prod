@@ -38,7 +38,6 @@ import noisereduce as nr
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload, MediaFileUpload
 from google.oauth2.service_account import Credentials
-from google.cloud import storage
 
 from shared_components import (
     Config, ConfigurationManager, 
@@ -256,235 +255,6 @@ class TaskVerifier:
             return set()
 
 
-class GoogleCloudStorageManager:
-    """Manages video uploads and downloads from Google Cloud Storage."""
-    
-    BUCKET_NAME = "gg_video_streamlit_6583"
-    
-    def __init__(self):
-        self.client = self._get_storage_client()
-        self.bucket = None
-        if self.client:
-            try:
-                self.bucket = self.client.bucket(self.BUCKET_NAME)
-            except Exception as e:
-                logger.error(f"Failed to access bucket {self.BUCKET_NAME}: {e}")
-    
-    @st.cache_resource(show_spinner=False)
-    def _get_storage_client(_self):
-        """Initialize Google Cloud Storage client."""
-        try:
-            service_account_info = ConfigurationManager.get_google_service_account_info()
-            if service_account_info:
-                credentials = Credentials.from_service_account_info(service_account_info)
-                return storage.Client(credentials=credentials, project=service_account_info.get('project_id'))
-            else:
-                logger.error("No Google Cloud credentials found")
-                return None
-        except Exception as e:
-            logger.error(f"Failed to initialize GCS client: {e}")
-            return None
-    
-    def upload_video(self, file_data, filename: str, content_type: str = "video/mp4") -> Optional[str]:
-        """Upload video to GCS and return signed URL. Chunking handled by streamlit-chunk-file-uploader."""
-        if not self.bucket:
-            logger.error("GCS bucket not available")
-            return None
-        
-        try:
-            blob_name = f"videos/{filename}"
-            blob = self.bucket.blob(blob_name)
-            
-            # Extract basic metadata for validation (using temp file)
-            file_data.seek(0)
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_file:
-                temp_file.write(file_data.read())
-                temp_path = temp_file.name
-            
-            try:
-                cap = cv2.VideoCapture(temp_path)
-                if cap.isOpened():
-                    metadata = {
-                        'width': str(int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))),
-                        'height': str(int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))),
-                        'fps': str(cap.get(cv2.CAP_PROP_FPS)),
-                        'total_frames': str(int(cap.get(cv2.CAP_PROP_FRAME_COUNT)))
-                    }
-                    fps = float(metadata['fps'])
-                    frames = int(metadata['total_frames'])
-                    metadata['duration'] = str(frames / fps if fps > 0 else 0.0)
-                    cap.release()
-                    blob.metadata = metadata
-            finally:
-                os.unlink(temp_path)
-            
-            # Upload to GCS (chunking handled by streamlit-chunk-file-uploader)
-            file_data.seek(0)
-            blob.upload_from_file(file_data, content_type=content_type, rewind=True)
-            
-            # Generate signed URL (7 days expiration)
-            from datetime import timedelta
-            signed_url = blob.generate_signed_url(
-                version="v4",
-                expiration=timedelta(days=7),
-                method="GET"
-            )
-            
-            file_size = blob.size or 0
-            logger.info(f"Video uploaded successfully: {blob_name} ({file_size / (1024*1024):.2f} MB)")
-            return signed_url
-            
-        except Exception as e:
-            logger.error(f"Failed to upload video to GCS: {e}")
-            return None
-    
-    def get_blob_from_url(self, video_url: str) -> Optional[str]:
-        """Extract blob name from signed URL and return blob path."""
-        try:
-            import urllib.parse
-            
-            # Parse the URL to get the path
-            parsed_url = urllib.parse.urlparse(video_url)
-            
-            # For signed URLs, the blob name is in the path
-            # Format: /storage/v1/b/{bucket}/o/{blob_name}?...
-            # or: /{bucket}/{blob_name}?...
-            path = parsed_url.path
-            
-            # Try different URL formats
-            if "/o/" in path:
-                # Format: /storage/v1/b/{bucket}/o/{blob_name}
-                parts = path.split("/o/")
-                if len(parts) < 2:
-                    logger.error(f"Invalid /o/ format in URL path: {path}")
-                    return None
-                blob_name = parts[1]
-            elif f"/{self.BUCKET_NAME}/" in path:
-                # Format: /{bucket}/{blob_name}
-                parts = path.split(f"/{self.BUCKET_NAME}/")
-                if len(parts) < 2:
-                    logger.error(f"Invalid bucket format in URL path: {path}")
-                    return None
-                blob_name = parts[1]
-            elif "videos/" in path:
-                # Direct path format
-                blob_name = path.lstrip("/")
-            else:
-                logger.error(f"Could not parse blob name from URL path: {path}")
-                return None
-            
-            # URL decode the blob name
-            blob_name = urllib.parse.unquote(blob_name)
-            
-            logger.info(f"Extracted blob name: {blob_name}")
-            return blob_name
-            
-        except Exception as e:
-            logger.error(f"Failed to extract blob name from URL: {e}")
-            return None
-    
-    def get_video_metadata_from_blob_name(self, blob_name: str) -> Optional[Dict[str, Any]]:
-        """Get video metadata directly from blob name."""
-        if not self.bucket:
-            logger.error("GCS bucket not available")
-            return None
-        
-        try:
-            blob = self.bucket.blob(blob_name)
-            blob.reload()  # Load metadata from GCS
-            
-            if not blob.metadata:
-                logger.warning(f"No metadata found for blob: {blob_name}")
-                return None
-            
-            # Parse metadata
-            metadata = {
-                'width': int(blob.metadata.get('width', 0)),
-                'height': int(blob.metadata.get('height', 0)),
-                'fps': float(blob.metadata.get('fps', 0)),
-                'duration': float(blob.metadata.get('duration', 0)),
-                'total_frames': int(blob.metadata.get('total_frames', 0))
-            }
-            
-            logger.info(f"Retrieved metadata for {blob_name}: {metadata}")
-            return metadata
-            
-        except Exception as e:
-            logger.error(f"Failed to get video metadata from GCS: {e}")
-            return None
-    
-    def get_video_metadata(self, video_url: str) -> Optional[Dict[str, Any]]:
-        """Get video metadata from GCS blob without downloading the full video."""
-        if not self.bucket:
-            logger.error("GCS bucket not available")
-            return None
-        
-        try:
-            blob_name = self.get_blob_from_url(video_url)
-            if not blob_name:
-                logger.error("Could not extract blob name from URL")
-                logger.debug(f"Problem URL: {video_url[:100]}...")
-                return None
-            
-            return self.get_video_metadata_from_blob_name(blob_name)
-            
-        except Exception as e:
-            logger.error(f"Failed to get video metadata from GCS: {e}")
-            return None
-    
-    def download_video_to_temp(self, video_url: str, session_id: str) -> Optional[str]:
-        """Download video from URL to temporary file in existing session directory."""
-        try:
-            session_manager = get_session_manager()
-            
-            # Get existing session directory - don't create new one
-            session_dir = session_manager.get_session_directory(session_id)
-            if not session_dir:
-                logger.error(f"Session directory not found for session_id: {session_id}")
-                return None
-            
-            temp_path = session_manager.create_temp_file(session_id, "video", ".mp4")
-            
-            response = requests.get(video_url, stream=True, timeout=300)
-            response.raise_for_status()
-            
-            with open(temp_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-            
-            if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
-                logger.info(f"Video downloaded successfully to {temp_path}")
-                return temp_path
-            else:
-                logger.error("Downloaded file is empty or doesn't exist")
-                return None
-                
-        except Exception as e:
-            logger.error(f"Failed to download video from URL: {e}")
-            return None
-    
-    def delete_video(self, video_url: str) -> bool:
-        """Delete video from GCS using signed URL."""
-        if not self.bucket:
-            return False
-        
-        try:
-            # Extract blob name from signed URL
-            blob_name = self.get_blob_from_url(video_url)
-            if not blob_name:
-                logger.error("Could not extract blob name from URL")
-                return False
-            
-            blob = self.bucket.blob(blob_name)
-            blob.delete()
-            logger.info(f"Video deleted: {blob_name}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to delete video: {e}")
-            return False
-
-
 class ScreenManager:
     """Screen interface state management."""
     
@@ -501,10 +271,10 @@ class ScreenManager:
             st.session_state.initial_prompt = ""
         if 'agent_email' not in st.session_state:
             st.session_state.agent_email = ""
-        if 'gemini_video_url' not in st.session_state:
-            st.session_state.gemini_video_url = None
-        if 'competitor_video_url' not in st.session_state:
-            st.session_state.competitor_video_url = None
+        if 'gemini_video_path' not in st.session_state:
+            st.session_state.gemini_video_path = None
+        if 'competitor_video_path' not in st.session_state:
+            st.session_state.competitor_video_path = None
         if 'selected_language' not in st.session_state:
             st.session_state.selected_language = ""
         if 'task_type' not in st.session_state:
@@ -523,26 +293,6 @@ class ScreenManager:
             st.session_state.analysis_started = False
         if 'validation_error_shown' not in st.session_state:
             st.session_state.validation_error_shown = False
-        if 'feedback_rating' not in st.session_state:
-            st.session_state.feedback_rating = None
-        if 'feedback_submitted' not in st.session_state:
-            st.session_state.feedback_submitted = False
-        if 'feedback_issues' not in st.session_state:
-            st.session_state.feedback_issues = []
-        if 'feedback_processed' not in st.session_state:
-            st.session_state.feedback_processed = False
-        if 'submission_locked' not in st.session_state:
-            st.session_state.submission_locked = False
-        if 'gemini_video_temp_path' not in st.session_state:
-            st.session_state.gemini_video_temp_path = None
-        if 'competitor_video_temp_path' not in st.session_state:
-            st.session_state.competitor_video_temp_path = None
-        if 'gemini_video_uploading' not in st.session_state:
-            st.session_state.gemini_video_uploading = False
-        if 'competitor_video_uploading' not in st.session_state:
-            st.session_state.competitor_video_uploading = False
-        if 'failed_video_uploaded' not in st.session_state:
-            st.session_state.failed_video_uploaded = False
         if 'quality_comparison' not in st.session_state:
             st.session_state.quality_comparison = "-- Select rating --"
         
@@ -786,7 +536,7 @@ class InputScreen:
             
             # Only process upload if video exists, not already uploaded, and not currently uploading
             if (gemini_video and 
-                not st.session_state.get('gemini_video_url') and 
+                not st.session_state.get('gemini_video_path') and 
                 not st.session_state.get('gemini_video_uploading')):
                 
                 # Check if it's an MP4 file
@@ -796,27 +546,46 @@ class InputScreen:
                     # Set uploading flag to prevent duplicate uploads
                     st.session_state.gemini_video_uploading = True
                     
-                    with st.spinner("Uploading Gemini video to cloud..."):
-                        gcs_manager = GoogleCloudStorageManager()
+                    with st.spinner("Saving Gemini video..."):
+                        session_manager = get_session_manager()
+                        
+                        # Ensure session directory exists
+                        session_dir = session_manager.get_session_directory(st.session_state.session_id)
+                        if not session_dir:
+                            session_dir = session_manager.create_session(st.session_state.session_id)
+                            logger.info(f"Created session directory for video upload: {session_dir}")
+                        
                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                         filename = f"gemini_{question_id}_{timestamp}.mp4"
-                        url = gcs_manager.upload_video(gemini_video, filename)
-                        if url:
-                            st.session_state.gemini_video_url = url
-                            st.session_state.gemini_video_blob_name = f"videos/{filename}"
-                            st.session_state.gemini_video_uploading = False
-                        else:
-                            st.error("❌ Failed to upload Gemini video")
+                        temp_path = session_manager.create_temp_file(st.session_state.session_id, filename, ".mp4")
+                        
+                        try:
+                            # Save uploaded file to session directory
+                            gemini_video.seek(0)
+                            with open(temp_path, 'wb') as f:
+                                f.write(gemini_video.read())
+                            
+                            if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+                                st.session_state.gemini_video_path = temp_path
+                                st.session_state.gemini_video_file = gemini_video  # Keep reference for Drive upload
+                                st.session_state.gemini_video_uploading = False
+                                logger.info(f"Gemini video saved successfully to {temp_path}")
+                            else:
+                                st.error("❌ Failed to save Gemini video")
+                                st.session_state.gemini_video_uploading = False
+                        except Exception as e:
+                            logger.error(f"Failed to save Gemini video: {e}")
+                            st.error("❌ Failed to save Gemini video")
                             st.session_state.gemini_video_uploading = False
             
-            if st.session_state.get('gemini_video_url'):
+            if st.session_state.get('gemini_video_path'):
                 st.success("✅ Gemini video ready")
         
         with col2:
             st.markdown("#### Competitor Video *")
             
             # Check if Gemini video is uploaded
-            gemini_uploaded = st.session_state.get('gemini_video_url') is not None
+            gemini_uploaded = st.session_state.get('gemini_video_path') is not None
             
             if not gemini_uploaded:
                 st.info("📌 Please upload the Gemini video first before uploading the Competitor video.")
@@ -837,7 +606,7 @@ class InputScreen:
                 
                 # Only process upload if video exists, not already uploaded, and not currently uploading
                 if (competitor_video and 
-                    not st.session_state.get('competitor_video_url') and 
+                    not st.session_state.get('competitor_video_path') and 
                     not st.session_state.get('competitor_video_uploading')):
                     
                     # Check if it's an MP4 file
@@ -847,33 +616,52 @@ class InputScreen:
                         # Set uploading flag to prevent duplicate uploads
                         st.session_state.competitor_video_uploading = True
                         
-                        with st.spinner("Uploading Competitor video to cloud..."):
-                            gcs_manager = GoogleCloudStorageManager()
+                        with st.spinner("Saving Competitor video..."):
+                            session_manager = get_session_manager()
+                            
+                            # Ensure session directory exists
+                            session_dir = session_manager.get_session_directory(st.session_state.session_id)
+                            if not session_dir:
+                                session_dir = session_manager.create_session(st.session_state.session_id)
+                                logger.info(f"Created session directory for video upload: {session_dir}")
+                            
                             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                             filename = f"competitor_{question_id}_{timestamp}.mp4"
-                            url = gcs_manager.upload_video(competitor_video, filename)
-                            if url:
-                                st.session_state.competitor_video_url = url
-                                st.session_state.competitor_video_blob_name = f"videos/{filename}"
-                                st.session_state.competitor_video_uploading = False
-                            else:
-                                st.error("❌ Failed to upload Competitor video")
+                            temp_path = session_manager.create_temp_file(st.session_state.session_id, filename, ".mp4")
+                            
+                            try:
+                                # Save uploaded file to session directory
+                                competitor_video.seek(0)
+                                with open(temp_path, 'wb') as f:
+                                    f.write(competitor_video.read())
+                                
+                                if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+                                    st.session_state.competitor_video_path = temp_path
+                                    st.session_state.competitor_video_file = competitor_video  # Keep reference for Drive upload
+                                    st.session_state.competitor_video_uploading = False
+                                    logger.info(f"Competitor video saved successfully to {temp_path}")
+                                else:
+                                    st.error("❌ Failed to save Competitor video")
+                                    st.session_state.competitor_video_uploading = False
+                            except Exception as e:
+                                logger.error(f"Failed to save Competitor video: {e}")
+                                st.error("❌ Failed to save Competitor video")
                                 st.session_state.competitor_video_uploading = False
                 
-                if st.session_state.get('competitor_video_url'):
+                if st.session_state.get('competitor_video_path'):
                     st.success("✅ Competitor video ready")
 
         st.divider()
 
         # Display video previews and validation if both videos are uploaded
-        if st.session_state.get('gemini_video_url') and st.session_state.get('competitor_video_url'):
+        if st.session_state.get('gemini_video_path') and st.session_state.get('competitor_video_path'):
             st.subheader("📊 Video Validation")
             col1, col2 = st.columns(2)
             
             with col1:
                 st.markdown("**Gemini Video**")
-                InputScreen._render_video_validation_from_url(
-                    st.session_state.gemini_video_url, 
+                InputScreen._render_video_validation_from_path(
+                    st.session_state.gemini_video_path, 
                     "gemini", 
                     question_id, 
                     inferred_language, 
@@ -882,8 +670,8 @@ class InputScreen:
                 
             with col2:
                 st.markdown("**Competitor Video**")
-                InputScreen._render_video_validation_from_url(
-                    st.session_state.competitor_video_url, 
+                InputScreen._render_video_validation_from_path(
+                    st.session_state.competitor_video_path, 
                     "competitor", 
                     question_id, 
                     inferred_language, 
@@ -1005,18 +793,18 @@ class InputScreen:
             errors.append("Please enter a valid agent email address")
         
         # Check if both videos are uploaded
-        if not st.session_state.get('gemini_video_url'):
+        if not st.session_state.get('gemini_video_path'):
             errors.append("validation_error")
-        if not st.session_state.get('competitor_video_url'):
+        if not st.session_state.get('competitor_video_path'):
             errors.append("validation_error")
         
         # Validate both videos
-        if st.session_state.get('gemini_video_url'):
+        if st.session_state.get('gemini_video_path'):
             gemini_validation = st.session_state.get('gemini_video_validation', {})
             if gemini_validation and not (gemini_validation.get('duration_valid', False) and gemini_validation.get('resolution_valid', False)):
                 errors.append("validation_error")
         
-        if st.session_state.get('competitor_video_url'):
+        if st.session_state.get('competitor_video_path'):
             competitor_validation = st.session_state.get('competitor_video_validation', {})
             if competitor_validation and not (competitor_validation.get('duration_valid', False) and competitor_validation.get('resolution_valid', False)):
                 errors.append("validation_error")
@@ -1033,6 +821,55 @@ class InputScreen:
         """Basic email validation."""
         pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
         return re.match(pattern, email) is not None
+    
+    @staticmethod
+    def _render_video_validation_from_path(video_path: str, video_type: str, question_id="", inferred_language="", inferred_task_type=""):
+        """Render video validation from local file path."""
+        try:
+            # Check if validation is already cached
+            validation_key = f'{video_type}_video_validation'
+            if validation_key in st.session_state:
+                validation_results = st.session_state[validation_key]
+            else:
+                with st.spinner(f"Validating {video_type} video..."):
+                    validation_results = Config.validate_video_properties(video_path)
+                
+                if 'error' in validation_results:
+                    st.error(f"❌ Could not validate {video_type} video: {validation_results['error']}")
+                    return
+                
+                # Cache validation results
+                st.session_state[validation_key] = validation_results
+            
+            duration = validation_results.get('duration', 0)
+            duration_valid = validation_results.get('duration_valid', False)
+            min_duration = validation_results.get('min_duration_required', Config.MIN_VIDEO_DURATION)
+            
+            if duration_valid:
+                st.success(f"✅ **Duration**: {duration:.1f}s")
+            else:
+                st.error(f"❌ **Duration**: {duration:.1f}s (min {min_duration}s)")
+            
+            width = validation_results.get('width', 0)
+            height = validation_results.get('height', 0)
+            resolution_valid = validation_results.get('resolution_valid', False)
+            
+            if resolution_valid:
+                st.success(f"✅ **Resolution**: {width}x{height} (Portrait Mobile)")
+            else:
+                st.error(f"❌ **Resolution**: {width}x{height} (Portrait Mobile Required)")
+            
+            # Display inferred language and task type
+            if inferred_language:
+                language_display = Config.get_language_display_name(inferred_language) or inferred_language
+                st.info(f"🗣️ **Target Language**: {language_display}")
+            
+            if inferred_task_type and inferred_task_type != 'Unknown':
+                st.info(f"🎯 **Task Type**: {inferred_task_type}")
+                
+        except Exception as e:
+            logger.error(f"Error validating {video_type} video: {e}")
+            st.error(f"❌ Could not validate {video_type} video")
     
     @staticmethod
     def _render_video_validation_from_url(video_url: str, video_type: str, question_id="", inferred_language="", inferred_task_type=""):
@@ -1143,15 +980,13 @@ class AnalysisScreen:
                 session_dir = session_manager.create_session(session_id)
                 logger.info(f"Created session directory for analysis: {session_dir}")
             
-            gcs_manager = GoogleCloudStorageManager()
-            
             # Analyze Gemini Video
             with gemini_progress_container:
                 st.markdown("### 📹 Analyzing Gemini Video")
                 gemini_progress = st.progress(0, text="Initializing Gemini analysis...")
                 
                 gemini_video_path = AnalysisScreen._prepare_video_for_analysis(
-                    'gemini', gcs_manager, session_id, gemini_progress
+                    'gemini', session_id, gemini_progress
                 )
                 
                 if not gemini_video_path:
@@ -1170,7 +1005,7 @@ class AnalysisScreen:
                 competitor_progress = st.progress(0, text="Initializing Competitor analysis...")
                 
                 competitor_video_path = AnalysisScreen._prepare_video_for_analysis(
-                    'competitor', gcs_manager, session_id, competitor_progress
+                    'competitor', session_id, competitor_progress
                 )
                 
                 if not competitor_video_path:
@@ -1199,12 +1034,6 @@ class AnalysisScreen:
             st.session_state.video_duration = gemini_duration
             st.session_state.qa_checker = st.session_state.gemini_qa_checker
             
-            # Export results for both videos
-            AnalysisScreen._export_both_results(
-                gemini_results, competitor_results, 
-                gemini_duration, competitor_duration
-            )
-            
             st.rerun()
             
         except Exception as e:
@@ -1213,30 +1042,45 @@ class AnalysisScreen:
             AnalysisScreen._render_analysis_error_buttons()
     
     @staticmethod
-    def _prepare_video_for_analysis(video_type: str, gcs_manager, session_id, progress_bar) -> Optional[str]:
-        """Prepare video for analysis by checking cached path or downloading from GCS."""
-        url_key = f'{video_type}_video_url'
-        temp_path_key = f'{video_type}_video_temp_path'
+    def _prepare_video_for_analysis(video_type: str, session_id, progress_bar) -> Optional[str]:
+        """Prepare video for analysis using locally saved path."""
+        path_key = f'{video_type}_video_path'
         
-        # Check if video is already downloaded and file still exists
-        existing_path = st.session_state.get(temp_path_key)
-        if existing_path and os.path.exists(existing_path) and os.path.getsize(existing_path) > 0:
-            logger.info(f"Reusing existing {video_type} video from: {existing_path}")
+        # Get the saved video path
+        video_path = st.session_state.get(path_key)
+        
+        if video_path and os.path.exists(video_path) and os.path.getsize(video_path) > 0:
+            logger.info(f"Using {video_type} video from: {video_path}")
             progress_bar.progress(10, text=f"{video_type.capitalize()} video ready for analysis...")
-            return existing_path
-        
-        # Download video fresh for analysis
-        progress_bar.progress(5, text=f"Downloading {video_type} video from cloud...")
-        video_path = gcs_manager.download_video_to_temp(
-            getattr(st.session_state, url_key), session_id
-        )
-        
-        if video_path:
-            # Store temp path for reuse
-            setattr(st.session_state, temp_path_key, video_path)
-            progress_bar.progress(10, text=f"{video_type.capitalize()} video ready for analysis...")
-        
-        return video_path
+            return video_path
+        else:
+            logger.error(f"{video_type} video not found or invalid")
+            return None
+    
+    @staticmethod
+    def _upload_video_to_drive(video_path: str, video_label: str) -> Optional[str]:
+        """Upload video to Google Drive Passed_Submissions folder."""
+        try:
+            drive_integration = GoogleDriveIntegration()
+            
+            # Always upload to Passed_Submissions folder
+            drive_link = drive_integration.upload_video_to_shared_drive(
+                video_file=video_path,
+                question_id=st.session_state.question_id,
+                alias_email=st.session_state.alias_email,
+                passed_qa=True  # Always use Passed folder now
+            )
+            
+            if drive_link:
+                logger.info(f"{video_label} video uploaded to Drive: {drive_link}")
+                return drive_link
+            else:
+                logger.error(f"Failed to upload {video_label} video to Drive")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error uploading {video_label} video to Drive: {e}")
+            return None
     
     @staticmethod
     def _run_single_analysis(analyzer, video_path, progress_bar, video_label: str):
@@ -1267,6 +1111,25 @@ class AnalysisScreen:
             progress_bar.progress(90, text=f"Wrapping up {video_label} analysis...")
             analyzer.export_results(f"{video_label.lower()}_results.json")
             analyzer.cleanup_temp_files()
+            
+            # Upload video to Drive immediately after analysis
+            progress_bar.progress(95, text=f"Uploading {video_label} video to Drive...")
+            drive_link = AnalysisScreen._upload_video_to_drive(video_path, video_label)
+            
+            # Store the Drive link for later use in QC export
+            if drive_link:
+                link_key = f'{video_label.lower()}_drive_link'
+                st.session_state[link_key] = drive_link
+                progress_bar.progress(98, text=f"Drive upload complete!")
+                
+                # Remove temporary video file after upload
+                try:
+                    if os.path.exists(video_path):
+                        os.remove(video_path)
+                        logger.info(f"Removed temporary {video_label} video: {video_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to remove temp video {video_path}: {e}")
+            
             progress_bar.progress(100, text=f"✅ {video_label} analysis complete!")
             
             return results
@@ -1276,37 +1139,6 @@ class AnalysisScreen:
             progress_bar.progress(100, text=f"❌ {video_label} analysis failed")
             raise  # Re-raise to be caught by parent handler
     
-    @staticmethod
-    def _export_both_results(gemini_results, competitor_results, gemini_duration, competitor_duration):
-        """Export results for both videos."""
-        try:
-            exporter = GoogleSheetsResultsExporter()
-            
-            # Export Gemini results
-            gemini_success = exporter.export_results(
-                st.session_state.question_id,
-                st.session_state.alias_email,
-                gemini_results,
-                st.session_state.gemini_qa_checker,
-                gemini_duration,
-                video_type="Gemini"
-            )
-            
-            # Export Competitor results
-            competitor_success = exporter.export_results(
-                st.session_state.question_id,
-                st.session_state.alias_email,
-                competitor_results,
-                st.session_state.competitor_qa_checker,
-                competitor_duration,
-                video_type="Competitor"
-            )
-            
-            logger.info(f"Results export - Gemini: {'✓' if gemini_success else '✗'}, Competitor: {'✓' if competitor_success else '✗'}")
-            
-        except Exception as e:
-            logger.error(f"Error during results export: {e}")
-
     @staticmethod
     def _setup_and_run_analysis(analyzer, video_path, overall_progress):
         """Legacy method for backward compatibility."""
@@ -1341,20 +1173,6 @@ class AnalysisScreen:
         st.session_state.analysis_session_id = analyzer.session_id
         st.session_state.analyzer_instance = analyzer
         st.session_state.qa_checker = QualityAssuranceChecker(results, video_type='Gemini')  # Default to Gemini for legacy
-        
-        try:
-            exporter = GoogleSheetsResultsExporter()
-            export_success = exporter.export_results(
-                st.session_state.question_id,
-                st.session_state.alias_email,
-                results,
-                st.session_state.qa_checker,
-                video_duration,
-                video_type="Single Video"
-            )
-            logger.info(f"Results export {'successful' if export_success else 'failed'} for {st.session_state.question_id}")
-        except Exception as e:
-            logger.error(f"Error during results export: {e}")
         
         overall_progress.progress(100, text="Analysis complete!")
 
@@ -1437,8 +1255,45 @@ class AnalysisScreen:
             if results:
                 AnalysisScreen._render_individual_detections(results)
         
-        AnalysisScreen._render_feedback_section()
-        AnalysisScreen._render_navigation_buttons()
+        AnalysisScreen._render_export_section()
+    
+    @staticmethod
+    def _export_results_to_qc():
+        """Export analysis results to QC Task Queue."""
+        try:
+            # Get the Drive links that were stored during analysis
+            gemini_drive_link = st.session_state.get('gemini_drive_link', '')
+            competitor_drive_link = st.session_state.get('competitor_drive_link', '')
+            
+            if not gemini_drive_link or not competitor_drive_link:
+                st.error("❌ Drive links not found. Videos may not have been uploaded correctly.")
+                logger.error("Missing Drive links for QC export")
+                return
+            
+            # Export to QC Task Queue
+            exporter = QCTaskQueueExporter()
+            success = exporter.export_submission(
+                question_id=st.session_state.question_id,
+                alias_email=st.session_state.alias_email,
+                initial_prompt=st.session_state.get('initial_prompt', ''),
+                agent_email=st.session_state.get('agent_email', ''),
+                quality_comparison=st.session_state.get('quality_comparison', ''),
+                selected_language=st.session_state.selected_language,
+                gemini_drive_link=gemini_drive_link,
+                competitor_drive_link=competitor_drive_link
+            )
+            
+            if success:
+                st.session_state.results_exported = True
+                st.success("✅ Results exported to QC Task Queue successfully!")
+                logger.info(f"QC export completed for {st.session_state.question_id}")
+            else:
+                st.error("❌ Failed to export results to QC Task Queue")
+                logger.error("QC export failed")
+                
+        except Exception as e:
+            st.error(f"❌ Export error: {str(e)}")
+            logger.error(f"QC export error: {e}", exc_info=True)
     
     @staticmethod
     def _render_individual_detections(results, qa_checker=None, video_id=""):
@@ -1512,246 +1367,31 @@ class AnalysisScreen:
         render_detection_section(eval_results, "Eval Mode Text Detection", "Eval Mode")
 
     @staticmethod
-    def _render_feedback_section():
-        """Render feedback section for QA results rating."""
+    def _render_export_section():
+        """Render export results button."""
         if not st.session_state.get('analysis_results'):
             return
             
         st.divider()
-        st.write("Please rate the accuracy of the video analysis results:")
         
-        feedback_key = f"qa_feedback_{st.session_state.get('session_id', 'default')}"
-        
-        feedback_rating = st.feedback(
-            "thumbs",
-            key=feedback_key
-        )
-        
-        if feedback_rating is not None:
-            st.session_state.feedback_rating = feedback_rating
-            
-            if feedback_rating == 1:
-                st.session_state.feedback_submitted = True
-            elif feedback_rating == 0:
-                AnalysisScreen._render_feedback_issues_selection()
-        
-    @staticmethod
-    def _render_feedback_issues_selection():
-        """Render issue selection for negative feedback."""
-        st.write("Please select which analysis areas had issues:")
-        
-        qa_rules = [
-            ('flash_presence', '2.5 Flash Text Detection'),
-            ('alias_name_presence', 'Alias Name Detection'),
-            ('eval_mode_presence', 'Eval Mode Detection'),
-            ('language_fluency', 'Language Fluency Analysis'),
-            ('voice_audibility', 'Voice Audibility Analysis'),
-            ('background_noise', 'Background Noise Levels')
-        ]
-        
-        selected_issues = []
-        
-        for rule_key, rule_display_name in qa_rules:
-            if st.checkbox(rule_display_name, key=f"issue_{rule_key}"):
-                selected_issues.append(rule_key)
-        
-        st.session_state.feedback_issues = selected_issues
-        
-        if selected_issues:
-            st.session_state.feedback_submitted = True
-        else:
-            st.session_state.feedback_submitted = False
-
-    @staticmethod
-    def _render_navigation_buttons():
-        """Render navigation buttons based on QA status of both videos."""
         # Check if we have both videos analyzed
         has_both_results = (st.session_state.get('gemini_analysis_results') and 
                            st.session_state.get('competitor_analysis_results'))
         
         if has_both_results:
-            # Get QA summary for both videos
-            gemini_summary = st.session_state.gemini_qa_checker.get_qa_summary()
-            competitor_summary = st.session_state.competitor_qa_checker.get_qa_summary()
-            
-            gemini_passed = gemini_summary['passed']
-            competitor_passed = competitor_summary['passed']
-            both_passed = gemini_passed and competitor_passed
-            
-            # Determine button behavior
-            submit_enabled = both_passed
-            
-            if not both_passed:
-                # Upload failed videos silently
-                if not st.session_state.get('failed_videos_uploaded', False):
-                    AnalysisScreen._upload_failed_videos_silently(gemini_passed, competitor_passed)
-            
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("🔄 New Analysis", use_container_width=True):
                     AnalysisScreen._cleanup_and_reset_for_new_analysis()
             with col2:
-                if submit_enabled:
-                    if st.button("Submit Videos", type="primary", use_container_width=True):
-                        ScreenManager.navigate_to_screen('qa')
-                else:
-                    feedback_processed = st.session_state.get('feedback_processed', False)
-                    button_text = "✅ Feedback Submitted" if feedback_processed else "📝 Submit Feedback"
-                    if st.button(button_text, type="primary", use_container_width=True, disabled=feedback_processed):
-                        if not feedback_processed:
-                            AnalysisScreen._handle_submit_feedback()
-            
-            # Show warning message if any video failed
-            if not both_passed:
-                failed_videos = []
-                if not gemini_passed:
-                    failed_videos.append("Gemini")
-                if not competitor_passed:
-                    failed_videos.append("Competitor")
-                
-                videos_text = " and ".join(failed_videos)
-                st.warning(f"⚠️ {videos_text} video{'s' if len(failed_videos) > 1 else ''} failed quality checks. Please review the analysis results and make necessary adjustments.")
+                export_disabled = st.session_state.get('results_exported', False)
+                button_text = "✅ Results Exported" if export_disabled else "Export Results to QC"
+                if st.button(button_text, type="primary", use_container_width=True, disabled=export_disabled):
+                    AnalysisScreen._export_results_to_qc()
         else:
             # Legacy single video handling (should not happen anymore)
             st.error("⚠️ Both videos must be analyzed. Please start a new analysis.")
     
-    @staticmethod
-    def _upload_failed_videos_silently(gemini_passed: bool, competitor_passed: bool):
-        """Silently upload failed videos to Failed_Submissions folder without user notification."""
-        try:
-            question_id = st.session_state.get('question_id')
-            alias_email = st.session_state.get('alias_email')
-            
-            drive_integration = GoogleDriveIntegration()
-            
-            if not drive_integration.service:
-                logger.warning("Google Drive service not available for silent upload")
-                return
-            
-            gemini_drive_link = None
-            competitor_drive_link = None
-            
-            # Upload Gemini video if it failed (use cached temp path)
-            if not gemini_passed:
-                gemini_video_path = st.session_state.get('gemini_video_temp_path')
-                if gemini_video_path and os.path.exists(gemini_video_path):
-                    gemini_drive_link = drive_integration.upload_video_to_shared_drive(
-                        gemini_video_path, question_id, alias_email, passed_qa=False
-                    )
-                    if gemini_drive_link:
-                        logger.info(f"Failed Gemini video silently uploaded for {question_id}")
-                        st.session_state.gemini_drive_link = gemini_drive_link
-                    else:
-                        logger.warning(f"Failed to upload Gemini video for {question_id}")
-                else:
-                    logger.warning(f"Gemini video temp path not found for failed upload: {question_id}")
-            else:
-                # If Gemini passed, use the GCS URL (it won't be uploaded to failed folder)
-                gemini_drive_link = st.session_state.get('gemini_video_url', '')
-            
-            # Upload Competitor video if it failed (use cached temp path)
-            if not competitor_passed:
-                competitor_video_path = st.session_state.get('competitor_video_temp_path')
-                if competitor_video_path and os.path.exists(competitor_video_path):
-                    competitor_drive_link = drive_integration.upload_video_to_shared_drive(
-                        competitor_video_path, question_id, alias_email, passed_qa=False
-                    )
-                    if competitor_drive_link:
-                        logger.info(f"Failed Competitor video silently uploaded for {question_id}")
-                        st.session_state.competitor_drive_link = competitor_drive_link
-                    else:
-                        logger.warning(f"Failed to upload Competitor video for {question_id}")
-                else:
-                    logger.warning(f"Competitor video temp path not found for failed upload: {question_id}")
-            else:
-                # If Competitor passed, use the GCS URL (it won't be uploaded to failed folder)
-                competitor_drive_link = st.session_state.get('competitor_video_url', '')
-            
-            st.session_state.failed_videos_uploaded = True
-            logger.info(f"Failed video(s) upload process completed for {question_id}")
-            
-            # Export to QC Task Queue if we have at least one link
-            if gemini_drive_link or competitor_drive_link:
-                AnalysisScreen._export_failed_to_qc_task_queue(gemini_drive_link, competitor_drive_link)
-                
-        except Exception as e:
-            logger.error(f"Error during silent failed videos upload: {e}")
-
-    @staticmethod
-    def _export_failed_to_qc_task_queue(gemini_drive_link: str, competitor_drive_link: str):
-        """Export failed submission data to QC Task Queue."""
-        try:
-            question_id = st.session_state.get('question_id', '')
-            alias_email = st.session_state.get('alias_email', '')
-            initial_prompt = st.session_state.get('initial_prompt', '')
-            agent_email = st.session_state.get('agent_email', '')
-            quality_comparison = st.session_state.get('quality_comparison', '')
-            selected_language = st.session_state.get('selected_language', '')
-            
-            # Use empty string if links are None
-            gemini_link = gemini_drive_link if gemini_drive_link else ''
-            competitor_link = competitor_drive_link if competitor_drive_link else ''
-            
-            qc_exporter = QCTaskQueueExporter()
-            export_success = qc_exporter.export_submission(
-                question_id=question_id,
-                alias_email=alias_email,
-                initial_prompt=initial_prompt,
-                agent_email=agent_email,
-                quality_comparison=quality_comparison,
-                selected_language=selected_language,
-                gemini_drive_link=gemini_link,
-                competitor_drive_link=competitor_link
-            )
-            
-            if export_success:
-                logger.info(f"QC Task Queue export successful for failed submission: {question_id}")
-            else:
-                logger.warning(f"QC Task Queue export failed for failed submission: {question_id}")
-                
-        except Exception as e:
-            logger.error(f"Error exporting failed submission to QC Task Queue: {e}")
-
-    @staticmethod
-    def _handle_submit_feedback():
-        """Handle the submission of feedback when QA checks fail."""
-        try:
-            question_id = st.session_state.get('question_id', '')
-            alias_email = st.session_state.get('alias_email', '')
-            session_id = st.session_state.get('session_id', '')
-            feedback_rating = st.session_state.get('feedback_rating')
-            feedback_issues = st.session_state.get('feedback_issues', [])
-            qa_checker = st.session_state.get('qa_checker')
-            
-            if feedback_rating is None:
-                st.error("❌ Please provide feedback rating before submitting.")
-                return
-            
-            feedback_exporter = FeedbackExporter()
-            export_success = feedback_exporter.export_feedback(
-                question_id=question_id,
-                alias_email=alias_email,
-                session_id=session_id,
-                feedback_rating=feedback_rating,
-                feedback_issues=feedback_issues,
-                qa_results=qa_checker
-            )
-            
-            if export_success:
-                logger.info(f"Feedback submitted successfully for {question_id}")
-                
-                st.session_state.feedback_processed = True
-                
-                time.sleep(2)
-                st.rerun()
-            else:
-                st.error("❌ Failed to submit feedback. Please try again.")
-                logger.error(f"Failed to export feedback for {question_id}")
-                
-        except Exception as e:
-            st.error(f"❌ An error occurred while submitting feedback: {str(e)}")
-            logger.error(f"Error handling feedback submission: {e}")
-
     @staticmethod
     def _cleanup_and_reset_for_new_analysis():
         current_session_id = st.session_state.get('analysis_session_id', st.session_state.get('session_id'))
@@ -2105,50 +1745,6 @@ class GoogleSheetsResultsExporter(BaseGoogleSheetsExporter):
         return " | ".join(debug_parts)
 
 
-class FeedbackExporter(BaseGoogleSheetsExporter):
-    """Export user feedback on analysis quality to Google Sheets."""
-    
-    def export_feedback(self, question_id: str, alias_email: str, session_id: str,
-                       feedback_rating: int, feedback_issues: List[str] = None, qa_results: 'QualityAssuranceChecker' = None) -> bool:
-        """Export user feedback to Google Sheets."""
-        row_data = self._prepare_feedback_data(
-            question_id, alias_email, session_id, feedback_rating, feedback_issues or [], qa_results
-        )
-        return self._export_to_sheet(
-            sheet_name="User Feedback",
-            row_data=row_data,
-            operation_name="feedback export",
-            identifier=f"session {session_id}"
-        )
-    
-    def _prepare_feedback_data(self, question_id: str, alias_email: str, session_id: str,
-                              feedback_rating: int, feedback_issues: List[str], qa_results: 'QualityAssuranceChecker' = None) -> List[str]:
-        """Prepare feedback data row for export."""
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')
-        feedback_text = "Positive" if feedback_rating == 1 else "Negative"
-        
-        issues_text = ", ".join(feedback_issues) if feedback_issues else "None"
-        
-        qa_summary = ""
-        qa_status = ""
-        if qa_results:
-            summary = qa_results.get_qa_summary()
-            qa_status = "PASSED" if summary.get('passed', False) else "FAILED"
-            qa_summary = f"{summary.get('checks_passed', 0)}/{summary.get('total_checks', 0)} checks passed"
-        
-        return [
-            timestamp,
-            question_id,
-            alias_email, 
-            session_id,
-            str(feedback_rating),
-            feedback_text,
-            issues_text,
-            qa_status,
-            qa_summary
-        ]
-
-
 class QCTaskQueueExporter(BaseGoogleSheetsExporter):
     """Export video submission data to QC Task Queue Google Sheet."""
     
@@ -2447,290 +2043,6 @@ class GoogleDriveIntegration:
         except Exception as e:
             logger.error(f"Failed to create Google Drive folder: {e}")
             return None
-
-
-class VideoSubmissionScreen:
-    """Third screen: Video submission with Google Drive integration."""
-    @staticmethod
-    def render():
-        """Render the video submission screen."""
-        st.title("📤 Video Submission")
-        st.divider()
-        
-        VideoSubmissionScreen._initialize_submission_state()
-        
-        if st.session_state.get('upload_in_progress', False) and not st.session_state.get('video_uploaded', False):
-            VideoSubmissionScreen._perform_upload()
-        
-        VideoSubmissionScreen._render_submission_content()
-
-    @staticmethod
-    def _initialize_submission_state():
-        """Initialize session state for submission screen."""
-        defaults = {
-            'drive_folder_link': "",
-            'video_uploaded': False,
-            'task_submitted': False,
-            'submission_locked': False,
-            'upload_in_progress': False
-        }
-        for key, value in defaults.items():
-            if key not in st.session_state:
-                st.session_state[key] = value
-
-    @staticmethod
-    def _render_submission_content():
-        """Render the main submission content."""
-        if st.session_state.submission_locked:
-            VideoSubmissionScreen._render_submission_success()
-            return
-
-        st.info(f"""
-        **Video Submission:**
-        
-        Both your Gemini and Competitor videos passed all quality checks and are ready for submission.
-        Each video will be uploaded to the **Passed_Submissions** folder with its respective label.
-        Click the "Submit Both Videos" button below to finalize your submission.
-        """)
-        
-        # Display video information
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**🔵 Gemini Video**")
-            st.success("✅ Quality Checks Passed")
-        with col2:
-            st.markdown("**🔴 Competitor Video**")
-            st.success("✅ Quality Checks Passed")
-        
-        st.subheader("Confirm Submission")
-        
-        if st.session_state.upload_in_progress:
-            st.info("⏳ Uploading both videos to Passed_Submissions... Please wait.")
-        elif st.session_state.video_uploaded:
-            st.success("✅ Both videos uploaded successfully to Passed_Submissions!")
-        else:
-            if st.button("📤 Submit Both Videos", use_container_width=True, type="primary"):
-                VideoSubmissionScreen._upload_video_to_drive()
-
-    @staticmethod
-    def _upload_video_to_drive():
-        """Finalize submission (videos already in cloud)."""
-        try:
-            st.session_state.upload_in_progress = True
-            st.rerun()
-            
-        except Exception as e:
-            logger.error(f"Error initiating submission: {e}")
-            st.error(f"❌ An error occurred: {str(e)}")
-            st.session_state.upload_in_progress = False
-
-    @staticmethod
-    def _perform_upload():
-        """Perform the actual upload operation - upload both videos to Passed_Submissions."""
-        try:
-            question_id = st.session_state.get('question_id')
-            alias_email = st.session_state.get('alias_email')
-            session_id = st.session_state.get('session_id')
-            
-            gcs_manager = GoogleCloudStorageManager()
-            drive_integration = GoogleDriveIntegration()
-            
-            if not drive_integration.service:
-                st.error("❌ Google Drive service is not available. Please try again later.")
-                st.session_state.upload_in_progress = False
-                return
-
-            # Reuse Gemini video from analysis if available
-            gemini_video_path = st.session_state.get('gemini_video_temp_path')
-            if not gemini_video_path or not os.path.exists(gemini_video_path):
-                logger.info("Gemini video temp path not found or expired, downloading from GCS")
-                gemini_video_path = gcs_manager.download_video_to_temp(
-                    st.session_state.gemini_video_url, session_id
-                )
-                # Update session state with new path
-                if gemini_video_path:
-                    st.session_state.gemini_video_temp_path = gemini_video_path
-            else:
-                logger.info(f"Reusing Gemini video from analysis: {gemini_video_path}")
-            
-            # Reuse Competitor video from analysis if available
-            competitor_video_path = st.session_state.get('competitor_video_temp_path')
-            if not competitor_video_path or not os.path.exists(competitor_video_path):
-                logger.info("Competitor video temp path not found or expired, downloading from GCS")
-                competitor_video_path = gcs_manager.download_video_to_temp(
-                    st.session_state.competitor_video_url, session_id
-                )
-                # Update session state with new path
-                if competitor_video_path:
-                    st.session_state.competitor_video_temp_path = competitor_video_path
-            else:
-                logger.info(f"Reusing Competitor video from analysis: {competitor_video_path}")
-
-            # Upload both videos to Passed_Submissions folder
-            gemini_link = None
-            competitor_link = None
-            
-            with st.spinner("Uploading Gemini video to Google Drive..."):
-                gemini_link = drive_integration.upload_video_to_shared_drive(
-                    gemini_video_path, question_id, alias_email, passed_qa=True
-                )
-            
-            if gemini_link:
-                with st.spinner("Uploading Competitor video to Google Drive..."):
-                    competitor_link = drive_integration.upload_video_to_shared_drive(
-                        competitor_video_path, question_id, alias_email, passed_qa=True
-                    )
-            
-            st.session_state.upload_in_progress = False
-
-            if gemini_link and competitor_link:
-                st.session_state.video_uploaded = True
-                st.session_state.drive_folder_link = gemini_link  # Store folder link
-                st.session_state.gemini_drive_link = gemini_link
-                st.session_state.competitor_drive_link = competitor_link
-                
-                # Store GCS URLs for reference
-                st.session_state.final_gemini_url = st.session_state.gemini_video_url
-                st.session_state.final_competitor_url = st.session_state.competitor_video_url
-                
-                logger.info(f"Both videos uploaded successfully for {question_id}")
-                
-                # Export to QC Task Queue
-                VideoSubmissionScreen._export_to_qc_task_queue(gemini_link, competitor_link)
-                
-                VideoSubmissionScreen._handle_task_submission()
-            elif gemini_link:
-                st.error("❌ Gemini video uploaded, but Competitor video upload failed. Please try again.")
-            else:
-                st.error("❌ Failed to upload videos to Google Drive. Please try again.")
-                    
-        except Exception as e:
-            logger.error(f"Error uploading videos to Google Drive: {e}")
-            st.error(f"❌ An error occurred while uploading: {str(e)}")
-            st.session_state.upload_in_progress = False
-
-    @staticmethod
-    def _export_to_qc_task_queue(gemini_drive_link: str, competitor_drive_link: str):
-        """Export submission data to QC Task Queue after successful uploads."""
-        try:
-            question_id = st.session_state.get('question_id', '')
-            alias_email = st.session_state.get('alias_email', '')
-            initial_prompt = st.session_state.get('initial_prompt', '')
-            agent_email = st.session_state.get('agent_email', '')
-            quality_comparison = st.session_state.get('quality_comparison', '')
-            selected_language = st.session_state.get('selected_language', '')
-            
-            qc_exporter = QCTaskQueueExporter()
-            export_success = qc_exporter.export_submission(
-                question_id=question_id,
-                alias_email=alias_email,
-                initial_prompt=initial_prompt,
-                agent_email=agent_email,
-                quality_comparison=quality_comparison,
-                selected_language=selected_language,
-                gemini_drive_link=gemini_drive_link,
-                competitor_drive_link=competitor_drive_link
-            )
-            
-            if export_success:
-                logger.info(f"QC Task Queue export successful for {question_id}")
-            else:
-                logger.warning(f"QC Task Queue export failed for {question_id}")
-                
-        except Exception as e:
-            logger.error(f"Error exporting to QC Task Queue: {e}")
-
-    @staticmethod
-    def _handle_task_submission():
-        """Handle the task submission process."""
-        try:
-            st.session_state.task_submitted = True
-            st.session_state.submission_locked = True
-            
-            question_id = st.session_state.get('question_id')
-            alias_email = st.session_state.get('alias_email')
-            
-            if st.session_state.get('feedback_submitted', False):
-                try:
-                    feedback_exporter = FeedbackExporter()
-                    feedback_exporter.export_feedback(
-                        question_id=question_id,
-                        alias_email=alias_email,
-                        session_id=st.session_state.get('session_id', ''),
-                        feedback_rating=st.session_state.get('feedback_rating'),
-                        feedback_issues=st.session_state.get('feedback_issues', []),
-                        qa_results=st.session_state.get('qa_checker', None)
-                    )
-                    logger.info(f"Feedback exported for {question_id}")
-                except Exception as e:
-                    logger.error(f"Error exporting feedback: {e}")
-            
-            st.rerun()
-            
-        except Exception as e:
-            logger.error(f"Error handling task submission: {e}")
-            st.error(f"❌ An error occurred during submission: {str(e)}")
-
-    @staticmethod
-    def _render_submission_success():
-        st.success("✅ Both Gemini and Competitor videos uploaded successfully to Passed_Submissions. Your submission is now locked. Review the session summary below.")
-        
-        VideoSubmissionScreen._render_session_summary()
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            if st.button("⬅️ Back to Results", use_container_width=True):
-                ScreenManager.navigate_to_screen('analysis')
-        
-        with col2:
-            if st.button("🔄 Start New Analysis", use_container_width=True, type="primary"):
-                VideoSubmissionScreen._start_new_analysis_session()
-                
-    @staticmethod
-    def _render_session_summary():
-        """Render session summary section after submission completion."""
-        st.subheader("📋 Session Summary")
-        
-        question_id = st.session_state.get('question_id')
-        session_id = st.session_state.get('session_id')
-        task_type = st.session_state.get('task_type')
-        target_language = st.session_state.get('selected_language')
-
-        display_target_language = Config.get_language_display_name(target_language) if target_language else 'Unknown'
-        display_task_type = task_type if task_type != 'Unknown' else 'Not specified'
-        
-        st.info(f"**🔍 Question ID**  \n`{question_id}`")
-        st.info(f"**🆔 Session ID**  \n`{session_id}`")
-        st.info(f"**🎯 Task Type**  \n{display_task_type}")
-        st.info(f"**🗣️ Target Language**  \n{display_target_language}")
-        
-        st.divider()
-
-    @staticmethod
-    def _start_new_analysis_session():
-        """Start a completely new analysis session."""
-        current_session_id = st.session_state.get('analysis_session_id', st.session_state.get('session_id'))
-        if current_session_id:
-            session_manager = get_session_manager()
-            session_manager.cleanup_session(current_session_id)
-        
-        try:
-            session_manager = get_session_manager()
-            session_manager.cleanup_old_sessions()
-        except Exception as e:
-            logger.debug(f"Error cleaning old sessions: {e}")
-        
-        ScreenManager.cleanup_current_session()
-        
-        gc.collect()
-        
-        try:
-            cv2.destroyAllWindows()
-        except:
-            pass
-        
-        ScreenManager.reset_session_for_new_analysis()
 
 
 class TextMatcher:
@@ -5146,20 +4458,13 @@ class StreamlitInterface:
     def render_progress_indicator():
         """Render step progress indicator for navigation."""
         current_screen = ScreenManager.get_current_screen()
-        input_state = "completed" if current_screen in ['analysis', 'qa'] else ("active" if current_screen == 'input' else "")
-        analysis_state = "completed" if current_screen == 'qa' else ("active" if current_screen == 'analysis' else "")
-        
-        submission_completed = st.session_state.get('submission_locked', False)
-        if submission_completed:
-            qa_state = "completed"
-        else:
-            qa_state = "active" if current_screen == 'qa' else ""
+        input_state = "completed" if current_screen == 'analysis' else ("active" if current_screen == 'input' else "")
+        analysis_state = "active" if current_screen == 'analysis' else ""
             
         st.markdown(f"""
         <div class="step-indicator">
             <div class="step {input_state}"><span>1️⃣ Input Parameters</span></div>
-            <div class="step {analysis_state}"><span>2️⃣ Video Analysis</span></div>
-            <div class="step {qa_state}"><span>3️⃣ Submit Videos</span></div>
+            <div class="step {analysis_state}"><span>2️⃣ Analysis & Export</span></div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -5563,15 +4868,6 @@ class ApplicationRunner:
             """, unsafe_allow_html=True)
             
             StreamlitInterface.render_progress_indicator()
-
-            if st.session_state.get('submission_locked', False):
-                st.markdown("""
-                <div style="background-color: #fff8dc; padding: 15px; border-radius: 8px; margin: 20px 0; border: 1px solid #f0e68c;">
-                    <p style="color: #b8860b; margin: 0; font-size: 16px; text-align: center;">
-                        🔒 This session is now locked. Start a new session for another video analysis.
-                    </p>
-                </div>
-                """, unsafe_allow_html=True)
             
             current_screen = ScreenManager.get_current_screen()
             
@@ -5599,15 +4895,11 @@ class ApplicationRunner:
                             </div>
                             <div style="margin-bottom: 12px; display: flex; align-items: flex-start; gap: 12px;">
                                 <div style="background: linear-gradient(135deg, #2196F3, #1976D2); color: white; border-radius: 50%; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: bold; flex-shrink: 0; margin-top: 2px;">4</div>
-                                <div>The system will automatically analyze <strong>both videos independently</strong> for <strong>text detection</strong> (Gemini only), <strong>language fluency verification</strong> (both videos), and <strong>voice audibility quality</strong> (both videos) to ensure all requirements are met.</div>
+                                <div>The system will automatically analyze <strong>both videos independently</strong> for <strong>text detection</strong> (Gemini only), <strong>language fluency verification</strong> (both videos), and <strong>voice audibility quality</strong> (both videos) to ensure all requirements are met. Videos will be <strong>automatically uploaded</strong> to Google Drive Passed_Submissions folder after each analysis completes.</div>
                             </div>
-                            <div style="margin-bottom: 12px; display: flex; align-items: flex-start; gap: 12px;">
+                            <div style="display: flex; align-items: flex-start; gap: 12px;">
                                 <div style="background: linear-gradient(135deg, #2196F3, #1976D2); color: white; border-radius: 50%; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: bold; flex-shrink: 0; margin-top: 2px;">5</div>
-                                <div>Review the comprehensive <strong>analysis results</strong> and <strong>quality assurance checks</strong> for both videos. The system will indicate whether each video passes all requirements or if any issues need to be addressed before submission.</div>
-                            </div>
-                            <div style="margin-bottom: 12px; display: flex; align-items: flex-start; gap: 12px;">
-                                <div style="background: linear-gradient(135deg, #2196F3, #1976D2); color: white; border-radius: 50%; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: bold; flex-shrink: 0; margin-top: 2px;">6</div>
-                                <div>If <strong>both videos</strong> pass all checks, you'll have the functionality to upload them to separate Google Drive folders for final submission.</div>
+                                <div>Review the comprehensive <strong>analysis results</strong> and <strong>quality assurance checks</strong> for both videos, then click <strong>"Export Results to QC"</strong> to submit the analysis data and video links to the QC Task Queue for review.</div>
                             </div>
                         </div>
                     </div>
@@ -5622,9 +4914,6 @@ class ApplicationRunner:
                 elif current_screen == 'analysis':
                     main_content_area.empty()
                     AnalysisScreen.render()
-                elif current_screen == 'qa':
-                    main_content_area.empty()
-                    VideoSubmissionScreen.render()
                 else:
                     ScreenManager.navigate_to_screen('input')
             
