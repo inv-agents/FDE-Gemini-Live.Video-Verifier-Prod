@@ -60,7 +60,8 @@ class TargetTexts:
     """Target text definitions for detection."""
     FLASH_TEXT = "2.5 Flash"
     ALIAS_NAME_TEXT = "Roaring tiger"
-    EVAL_MODE_TEXT = "Eval Mode: A2T with TTS"
+    GEMINI_EVAL_MODE_TEXT = "Eval Mode: Live OR Rev 22"
+    COMPETITOR_EVAL_MODE_TEXT = "Eval Mode: A2T with TTS"
 
 
 class DetectionType(Enum):
@@ -128,9 +129,22 @@ class TaskVerifier:
     def verify_inputs(self, question_id: str, alias_email: str, agent_email: str) -> Tuple[bool, str]:
         """Verify if question_id, alias_email, and agent_email are valid."""
         try:
-            # Simple validation for Question ID (not empty)
+            # Validate Question ID format
             if not question_id or not question_id.strip():
                 return False, "Question ID cannot be empty"
+            
+            clean_question_id = question_id.strip()
+            
+            # Regex pattern for Question ID:
+            # - 32 hex characters (hash)
+            # - +bard_data+coach_
+            # - Project identifier (variable part)
+            # - +INTERNAL+en:
+            # - Numeric ID
+            question_id_pattern = r'^[a-f0-9]{32}\+bard_data\+coach_[^+]+\+INTERNAL\+en:\d+$'
+            
+            if not re.match(question_id_pattern, clean_question_id):
+                return False, "Invalid Question ID format. Expected format: <hash>+bard_data+coach_<project>+INTERNAL+en:<id>"
             
             # Validate Alias Email (not empty)
             if not alias_email or not alias_email.strip():
@@ -140,7 +154,6 @@ class TaskVerifier:
             if not agent_email or not agent_email.strip():
                 return False, "Agent email cannot be empty"
             
-            clean_question_id = question_id.strip()
             clean_alias_email = alias_email.strip().lower()
             clean_agent_email = agent_email.strip().lower()
             
@@ -523,7 +536,7 @@ class ScreenManager:
         if 'failed_video_uploaded' not in st.session_state:
             st.session_state.failed_video_uploaded = False
         if 'quality_comparison' not in st.session_state:
-            st.session_state.quality_comparison = "Gemini was much better"
+            st.session_state.quality_comparison = "-- Select rating --"
         
         if 'session_id' not in st.session_state:
             st.session_state.session_id = get_session_manager().generate_session_id()
@@ -719,7 +732,10 @@ class InputScreen:
         st.session_state.task_type = inferred_task_type
 
         st.subheader("⭐ Quality Comparison")
+        # Make the quality comparison explicitly required by adding a sentinel
+        _QC_SENTINEL = "-- Select rating --"
         quality_options = [
+            _QC_SENTINEL,
             "Gemini was much better",
             "Gemini was better",
             "Gemini was slightly better",
@@ -728,16 +744,21 @@ class InputScreen:
             "Competitor was better",
             "Competitor was much better"
         ]
-        
+
+        # Ensure session state holds the sentinel by default (so user must actively choose)
         if 'quality_comparison' not in st.session_state:
-            st.session_state.quality_comparison = quality_options[0]
-        
+            st.session_state.quality_comparison = _QC_SENTINEL
+
+        try:
+            default_index = quality_options.index(st.session_state.quality_comparison)
+        except ValueError:
+            default_index = 0
+
         quality_comparison = st.selectbox(
             "How would you rate Gemini compared to the competitor? *",
             options=quality_options,
-            index=None,
+            index=default_index,
             help="Select how Gemini performed compared to the competitor in this evaluation",
-            placeholder="Select quality comparison",
             disabled=st.session_state.get('analysis_in_progress', False)
         )
         st.session_state.quality_comparison = quality_comparison
@@ -976,6 +997,11 @@ class InputScreen:
             competitor_validation = st.session_state.get('competitor_video_validation', {})
             if competitor_validation and not (competitor_validation.get('duration_valid', False) and competitor_validation.get('resolution_valid', False)):
                 errors.append("validation_error")
+
+        # Quality comparison must be actively selected (not sentinel)
+        qc_value = st.session_state.get('quality_comparison', '')
+        if qc_value.strip() == '' or qc_value.strip().startswith('--'):
+            errors.append("Please select a quality comparison rating")
 
         return errors
 
@@ -4984,9 +5010,9 @@ def create_detection_rules(target_language: str, task_type: str = 'Monolingual',
     
     # Different eval mode text based on video type
     if video_type.lower() == 'gemini':
-        eval_mode_text = "Eval Mode: Live OR Rev 22"
+        eval_mode_text = TargetTexts.GEMINI_EVAL_MODE_TEXT
     else:  # Competitor
-        eval_mode_text = TargetTexts.EVAL_MODE_TEXT
+        eval_mode_text = TargetTexts.COMPETITOR_EVAL_MODE_TEXT
     
     text_rules_config = [
         (f"Text Detection: {TargetTexts.FLASH_TEXT}", TargetTexts.FLASH_TEXT),
