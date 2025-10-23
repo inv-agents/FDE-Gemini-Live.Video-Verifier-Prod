@@ -68,7 +68,7 @@ def render_getting_started():
                 - File size: Up to 200mb
                 - Duration: Minimum 30 seconds, maximum 10 minutes
                 - Resolution: Portrait mobile format required
-                - **Must show "Eval Mode: Native Audio Output"** text
+                - **Must show "Eval Mode: Live OR Rev 22"** text (partial text acceptable if full text doesn't fit on screen)
             - **Competitor Video File**: Upload your Competitor MP4 video file
                 - Same requirements as Gemini video
                 - Must use the same language and conversation flow
@@ -84,7 +84,7 @@ def render_getting_started():
             - **Text Detection** (Gemini video only): Looks for specific content using OCR techniques:
                 - "2.5 Flash" (to verify correct model usage)
                 - "Roaring Tiger" (to confirm correct alias usage)
-                - "Eval Mode: Native Audio Output" (to ensure proper eval mode for Gemini)
+                - "Eval Mode: Live OR Rev 22" (to ensure proper eval mode for Gemini - partial text acceptable)
                 - Note: Competitor video may have a different Eval Mode (e.g., "Server Text-to-Speech")
             - **Audio Analysis** (both videos): Checks language fluency and voice audibility
                 - Ensures both user and model voices are clearly heard
@@ -116,7 +116,7 @@ def render_getting_started():
             "✅ Both videos duration ≥ 30 seconds",
             "✅ Gemini video shows '2.5 Flash' text",
             "✅ Gemini video shows 'Roaring Tiger' alias",
-            "✅ Gemini video shows 'Eval Mode: Native Audio Output'",
+            "✅ Gemini video shows 'Eval Mode: Live OR Rev 22'",
             "✅ Competitor video shows appropriate Eval Mode",
             "✅ Both voices are audible (in both videos)",
             "✅ Language matches expected (in both videos)"
@@ -149,7 +149,8 @@ def render_analysis_details():
         st.markdown("""
         #### Eval Mode Detection  
         - **Purpose**: Ensure proper evaluation mode in Gemini video
-        - **Target**: "Eval Mode: Native Audio Output"
+        - **Target**: "Eval Mode: Live OR Rev 22" (partial match acceptable if full text doesn't fit)
+        - **Full Text**: "Eval Mode: Live OR Rev 22 Candidate v2" (may be truncated on screen)
         - **Importance**: Confirms correct system configuration for Gemini
         - **Note**: Only checked in Gemini video; Competitor may use different Eval Mode (e.g., "Server Text-to-Speech")
         """)
@@ -312,7 +313,7 @@ def render_tips_and_troubleshooting():
         #### 🎯 Model & Alias Guidelines
         - **Always use '2.5 Flash'** - never '2.5 Pro'
         - **Make sure your alias is shown before recording**
-        - **Enable 'Eval Mode: Native Audio Output'**
+        - **Enable 'Eval Mode: Live OR Rev 22 Candidate v2'** (at least "Live OR Rev 22" must be visible)
         - **Verify settings** before starting conversation
         - **Keep settings visible** throughout recording
         """)
@@ -437,5 +438,4 @@ def render_tips_and_troubleshooting():
         - Upload videos to their respective folders (Gemini to Gemini folder, Competitor to Competitor folder)
         """)
 
-if __name__ == "__main__":
-    main()
+main()

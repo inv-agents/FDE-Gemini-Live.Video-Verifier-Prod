@@ -2682,13 +2682,15 @@ class TextMatcher:
     OCR_CORRECTIONS: Dict[str, str] = {
     '2s flash': '2.5 flash', '2.s flash': '2.5 flash', '2,5 flash': '2.5 flash', '25 flash': '2.5 flash',
     'fiash': 'flash', 'flasb': 'flash', 'fash': 'flash', 'flashy': 'flash', 'flast': 'flash', 'flach': 'flash',
-        'evai mode': 'eval mode', 'eval rode': 'eval mode',
+        'evai mode': 'eval mode', 'eval rode': 'eval mode', 'evai rode': 'eval mode',
+        'live or': 'live or', 'iive or': 'live or', 'llve or': 'live or',
+        'rev 22': 'rev 22', 'rev22': 'rev 22', 'rev2z': 'rev 22', 'rev z2': 'rev 22',
         'roannng tiger': 'roaring tiger', 'roaring tiqer': 'roaring tiger', 'roaring tigee': 'roaring tiger',
         'roaring tger': 'roaring tiger', 'roaring ticer': 'roaring tiger', 'roanng tiger': 'roaring tiger',
         'roarmg tiger': 'roaring tiger', 'roarrng tiger': 'roaring tiger', 'roarirg tiger': 'roaring tiger',
         'roaring.tiger': 'roaring tiger', 'roaring . tiger': 'roaring tiger', 'roaring. tiger': 'roaring tiger',
         'roaring .tiger': 'roaring tiger', 'roaring..tiger': 'roaring tiger',
-        'rn': 'm', 'vv': 'w', '1': 'l'
+        'rn': 'm', 'vv': 'w', '1': 'l', 'z2': '22'
     }
 
     @staticmethod
@@ -2752,6 +2754,10 @@ class TextMatcher:
         if expected_lower == "roaring tiger" and cls._match_roaring_tiger_variants(detected_lower):
             return True, 'roaring_tiger_variant_match'
         
+        # Special handling for eval mode text - accept partial match
+        if expected_lower == "eval mode: live or rev 22" and cls._match_eval_mode_variants(detected_lower):
+            return True, 'eval_mode_variant_match'
+        
         if cls._exact_phrase_match(detected_lower, expected_lower):
             return True, 'exact_phrase_match'
             
@@ -2777,6 +2783,25 @@ class TextMatcher:
     def _match_roaring_tiger_variants(cls, detected_text: str) -> bool:
         """Matching for roaring tiger with various separators."""
         pattern = r'\broaring\s*[.\s_-]*\s*tiger\b'
+        return bool(re.search(pattern, detected_text))
+
+    @classmethod
+    @st.cache_data(show_spinner=False)
+    def _match_eval_mode_variants(cls, detected_text: str) -> bool:
+        """Matching for eval mode with flexible spacing and partial text acceptance."""
+        # Check for the key components: "eval mode", "live", "or", "rev", "22"
+        has_eval_mode = bool(re.search(r'\beval\s+mode\b', detected_text))
+        has_live = bool(re.search(r'\blive\b', detected_text))
+        has_or = bool(re.search(r'\bor\b', detected_text))
+        has_rev = bool(re.search(r'\brev\b', detected_text))
+        has_22 = bool(re.search(r'\b22\b|z2|2z', detected_text))
+        
+        # Must have all key components
+        if has_eval_mode and has_live and has_or and has_rev and has_22:
+            return True
+        
+        # Also accept the full phrase with flexible spacing
+        pattern = r'\beval\s+mode\s*:?\s*live\s+or\s+rev\s+2?2\b'
         return bool(re.search(pattern, detected_text))
 
     @classmethod
@@ -4959,7 +4984,7 @@ def create_detection_rules(target_language: str, task_type: str = 'Monolingual',
     
     # Different eval mode text based on video type
     if video_type.lower() == 'gemini':
-        eval_mode_text = "Eval Mode: Live OR Rev 22 Candidate v2"
+        eval_mode_text = "Eval Mode: Live OR Rev 22"
     else:  # Competitor
         eval_mode_text = TargetTexts.EVAL_MODE_TEXT
     
@@ -5231,18 +5256,18 @@ class QualityAssuranceChecker:
         """Check if the correct eval mode appears in text detection based on video type."""
         # Different validation based on video type
         if self.video_type.lower() == 'gemini':
-            # For Gemini videos, look for "Eval Mode: Live OR Rev 22 Candidate v2"
+            # For Gemini videos, look for "Eval Mode: Live OR Rev 22" (partial match acceptable)
             return self._check_text_detection(
                 filter_keywords=['text', 'ocr', 'eval'],
-                target_keywords=['eval', 'mode', 'live', 'rev', '22', 'candidate', 'v2'],
-                patterns=['eval mode', 'live', 'rev 22 candidate v2', 'eval mode: live or rev 22 candidate v2'],
-                success_message="✅ 'Eval Mode: Live OR Rev 22 Candidate v2' mode found with OCR text detections. Correct usage confirmed.",
-                failure_message="❌ 'Eval Mode: Live OR Rev 22 Candidate v2' mode was not found in any OCR text detections. Please ensure to use the correct mode and try again.",
+                target_keywords=['eval', 'mode', 'live', 'rev', '22'],
+                patterns=['eval mode', 'live', 'rev 22', 'eval mode: live or rev 22'],
+                success_message="✅ 'Eval Mode: Live OR Rev 22' mode found with OCR text detections. Correct usage confirmed.",
+                failure_message="❌ 'Eval Mode: Live OR Rev 22' mode was not found in any OCR text detections. Please ensure to use the correct mode and try again.",
                 result_key='eval_mode_found',
                 count_key='eval_mode_count',
                 custom_pattern_check=lambda detected_text, patterns: (
-                    ('eval mode' in detected_text and 'live' in detected_text and 'rev 22 candidate v2' in detected_text) or 
-                    'eval mode: live or rev 22 candidate v2' in detected_text
+                    ('eval mode' in detected_text and 'live' in detected_text and 'rev 22' in detected_text) or 
+                    'eval mode: live or rev 22' in detected_text
                 )
             )
         else:
@@ -5547,18 +5572,17 @@ class ApplicationRunner:
             """)
 
 
-
-if __name__ == "__main__":
+# Run the application when imported by st.navigation()
+try:
+    ApplicationRunner.run_streamlit_app()
+except KeyboardInterrupt:
+    logger.info("Application terminated by user")
+except Exception as e:
+    logger.error(f"Fatal application error: {e}")
+    raise
+finally:
     try:
-        ApplicationRunner.run_streamlit_app()
-    except KeyboardInterrupt:
-        logger.info("Application terminated by user")
-    except Exception as e:
-        logger.error(f"Fatal application error: {e}")
-        raise
-    finally:
-        try:
-            session_manager = get_session_manager()
-            session_manager.cleanup_old_sessions()
-        except:
-            pass
+        session_manager = get_session_manager()
+        session_manager.cleanup_old_sessions()
+    except:
+        pass
