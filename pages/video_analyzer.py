@@ -354,10 +354,18 @@ class GoogleCloudStorageManager:
             # Try different URL formats
             if "/o/" in path:
                 # Format: /storage/v1/b/{bucket}/o/{blob_name}
-                blob_name = path.split("/o/")[1]
+                parts = path.split("/o/")
+                if len(parts) < 2:
+                    logger.error(f"Invalid /o/ format in URL path: {path}")
+                    return None
+                blob_name = parts[1]
             elif f"/{self.BUCKET_NAME}/" in path:
                 # Format: /{bucket}/{blob_name}
-                blob_name = path.split(f"/{self.BUCKET_NAME}/")[1]
+                parts = path.split(f"/{self.BUCKET_NAME}/")
+                if len(parts) < 2:
+                    logger.error(f"Invalid bucket format in URL path: {path}")
+                    return None
+                blob_name = parts[1]
             elif "videos/" in path:
                 # Direct path format
                 blob_name = path.lstrip("/")
@@ -806,39 +814,54 @@ class InputScreen:
         
         with col2:
             st.markdown("#### Competitor Video *")
-            competitor_video = uploader(
-                "Upload Competitor's video (MP4 format, max 200MB)",
-                key="competitor_video_uploader",
-                chunk_size=31  # 31MB chunks to stay under GCR 32MB limit
-            )
             
-            # Only process upload if video exists, not already uploaded, and not currently uploading
-            if (competitor_video and 
-                not st.session_state.get('competitor_video_url') and 
-                not st.session_state.get('competitor_video_uploading')):
+            # Check if Gemini video is uploaded
+            gemini_uploaded = st.session_state.get('gemini_video_url') is not None
+            
+            if not gemini_uploaded:
+                st.info("📌 Please upload the Gemini video first before uploading the Competitor video.")
+                # Show disabled uploader placeholder
+                st.text_input(
+                    "Upload Competitor's video (MP4 format, max 200MB)",
+                    value="",
+                    disabled=True,
+                    key="competitor_disabled_placeholder",
+                    help="Upload Gemini video first"
+                )
+            else:
+                competitor_video = uploader(
+                    "Upload Competitor's video (MP4 format, max 200MB)",
+                    key="competitor_video_uploader",
+                    chunk_size=31  # 31MB chunks to stay under GCR 32MB limit
+                )
                 
-                # Check if it's an MP4 file
-                if not competitor_video.name.lower().endswith('.mp4'):
-                    st.error("❌ Please upload an MP4 video file")
-                else:
-                    # Set uploading flag to prevent duplicate uploads
-                    st.session_state.competitor_video_uploading = True
+                # Only process upload if video exists, not already uploaded, and not currently uploading
+                if (competitor_video and 
+                    not st.session_state.get('competitor_video_url') and 
+                    not st.session_state.get('competitor_video_uploading')):
                     
-                    with st.spinner("Uploading Competitor video to cloud..."):
-                        gcs_manager = GoogleCloudStorageManager()
-                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        filename = f"competitor_{question_id}_{timestamp}.mp4"
-                        url = gcs_manager.upload_video(competitor_video, filename)
-                        if url:
-                            st.session_state.competitor_video_url = url
-                            st.session_state.competitor_video_blob_name = f"videos/{filename}"
-                            st.session_state.competitor_video_uploading = False
-                        else:
-                            st.error("❌ Failed to upload Competitor video")
-                            st.session_state.competitor_video_uploading = False
-            
-            if st.session_state.get('competitor_video_url'):
-                st.success("✅ Competitor video ready")
+                    # Check if it's an MP4 file
+                    if not competitor_video.name.lower().endswith('.mp4'):
+                        st.error("❌ Please upload an MP4 video file")
+                    else:
+                        # Set uploading flag to prevent duplicate uploads
+                        st.session_state.competitor_video_uploading = True
+                        
+                        with st.spinner("Uploading Competitor video to cloud..."):
+                            gcs_manager = GoogleCloudStorageManager()
+                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            filename = f"competitor_{question_id}_{timestamp}.mp4"
+                            url = gcs_manager.upload_video(competitor_video, filename)
+                            if url:
+                                st.session_state.competitor_video_url = url
+                                st.session_state.competitor_video_blob_name = f"videos/{filename}"
+                                st.session_state.competitor_video_uploading = False
+                            else:
+                                st.error("❌ Failed to upload Competitor video")
+                                st.session_state.competitor_video_uploading = False
+                
+                if st.session_state.get('competitor_video_url'):
+                    st.success("✅ Competitor video ready")
 
         st.divider()
 
@@ -1217,35 +1240,41 @@ class AnalysisScreen:
     
     @staticmethod
     def _run_single_analysis(analyzer, video_path, progress_bar, video_label: str):
-        """Run analysis for a single video."""
-        default_rules = create_detection_rules(
-            target_language=st.session_state.selected_language,
-            task_type=st.session_state.task_type,
-            video_type=video_label  # Pass "Gemini" or "Competitor"
-        )
-        analyzer.rules = default_rules
-        progress_bar.progress(20, text=f"Added {video_label} analysis rules...")
-        
-        def progress_callback(percentage, message):
-            try:
-                progress_bar.progress(percentage, text=f"{video_label}: {message}")
-            except Exception as e:
-                logger.warning(f"Progress update failed: {e}")
-        
-        validation_key = f'{video_label.lower()}_video_validation'
-        results = analyzer.analyze_video(
-            video_path,
-            frame_interval=st.session_state.frame_interval,
-            progress_callback=progress_callback,
-            cached_validation=st.session_state.get(validation_key)
-        )
-        
-        progress_bar.progress(90, text=f"Wrapping up {video_label} analysis...")
-        analyzer.export_results(f"{video_label.lower()}_results.json")
-        analyzer.cleanup_temp_files()
-        progress_bar.progress(100, text=f"✅ {video_label} analysis complete!")
-        
-        return results
+        """Run analysis for a single video with error handling."""
+        try:
+            default_rules = create_detection_rules(
+                target_language=st.session_state.selected_language,
+                task_type=st.session_state.task_type,
+                video_type=video_label  # Pass "Gemini" or "Competitor"
+            )
+            analyzer.rules = default_rules
+            progress_bar.progress(20, text=f"Added {video_label} analysis rules...")
+            
+            def progress_callback(percentage, message):
+                try:
+                    progress_bar.progress(percentage, text=f"{video_label}: {message}")
+                except Exception as e:
+                    logger.warning(f"Progress update error: {e}")
+            
+            validation_key = f'{video_label.lower()}_video_validation'
+            results = analyzer.analyze_video(
+                video_path,
+                frame_interval=st.session_state.frame_interval,
+                progress_callback=progress_callback,
+                cached_validation=st.session_state.get(validation_key)
+            )
+            
+            progress_bar.progress(90, text=f"Wrapping up {video_label} analysis...")
+            analyzer.export_results(f"{video_label.lower()}_results.json")
+            analyzer.cleanup_temp_files()
+            progress_bar.progress(100, text=f"✅ {video_label} analysis complete!")
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"{video_label} analysis failed: {e}", exc_info=True)
+            progress_bar.progress(100, text=f"❌ {video_label} analysis failed")
+            raise  # Re-raise to be caught by parent handler
     
     @staticmethod
     def _export_both_results(gemini_results, competitor_results, gemini_duration, competitor_duration):
@@ -1428,7 +1457,7 @@ class AnalysisScreen:
         def get_qa_status(results_list):
             if not results_list or not qa_checker:
                 return ""
-            qa_info = AnalysisScreen._get_qa_info_for_result(results_list[0], qa_checker)
+            qa_info = AnalysisScreen._get_qa_info_for_result(results_list[0], qa_checker) if len(results_list) > 0 else None
             return f" - {'✅ PASS' if qa_info and qa_info['passed'] else '❌ FAIL'}" if qa_info else ""
             
         if language_results:
@@ -1442,9 +1471,10 @@ class AnalysisScreen:
                     AnalysisScreen._render_audio_detection_result(result, qa_checker, f"{video_id}_voice_{idx}")
 
         if background_results:
-            latest_background_result = background_results[-1]
-            with st.expander(f"🌫️ Background Noise Analysis{get_qa_status(background_results)}", expanded=False):
-                AnalysisScreen._render_background_noise_result(latest_background_result, qa_checker, video_id)
+            latest_background_result = background_results[-1] if len(background_results) > 0 else None
+            if latest_background_result:
+                with st.expander(f"🌫️ Background Noise Analysis{get_qa_status(background_results)}", expanded=False):
+                    AnalysisScreen._render_background_noise_result(latest_background_result, qa_checker, video_id)
 
     @staticmethod
     def _render_text_detections(text_results, qa_checker=None, video_id=""):
@@ -1458,12 +1488,12 @@ class AnalysisScreen:
                 return
                 
             positive = [r for r in results if r.detected]
-            qa_info = AnalysisScreen._get_qa_info_for_result(results[0], qa_checker)
+            qa_info = AnalysisScreen._get_qa_info_for_result(results[0], qa_checker) if len(results) > 0 else None
             qa_status = f" - {'✅ PASS' if qa_info and qa_info['passed'] else '❌ FAIL'}" if qa_info else ""
             
             if positive:
                 with st.expander(f"📝 {title}{qa_status}", expanded=False):
-                    AnalysisScreen._render_text_detection_result(positive[0], qa_checker, video_id)
+                    AnalysisScreen._render_text_detection_result(positive[0], qa_checker, video_id) if len(positive) > 0 else None
             else:
                 with st.expander(f"📝 {title}{qa_status}", expanded=False):
                     if special_handler:
@@ -2048,7 +2078,7 @@ class GoogleSheetsResultsExporter(BaseGoogleSheetsExporter):
                 if transcription and transcription.strip():
                     transcription_results.append(transcription.strip())
         
-        if transcription_results:
+        if transcription_results and len(transcription_results) > 0:
             transcription_results.sort(key=len, reverse=True)
             return transcription_results[0]
         
@@ -2260,7 +2290,7 @@ class GoogleDriveIntegration:
             
             folders = results.get('files', [])
             
-            if folders:
+            if folders and len(folders) > 0:
                 folder_id = folders[0]['id']
                 logger.info(f"Found existing folder '{folder_name}' with ID: {folder_id}")
                 self._folder_cache[cache_key] = folder_id
@@ -2314,7 +2344,9 @@ class GoogleDriveIntegration:
                 return None
             
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            file_name = f"Video_{question_id}_{alias_email.split('@')[0]}_{timestamp}.mp4"
+            email_parts = alias_email.split('@')
+            email_prefix = email_parts[0] if len(email_parts) > 0 else "unknown"
+            file_name = f"Video_{question_id}_{email_prefix}_{timestamp}.mp4"
             
             file_metadata = {
                 'name': file_name,
@@ -2390,7 +2422,9 @@ class GoogleDriveIntegration:
         
         try:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            folder_name = f"Video_Submission_{question_id}_{alias_email.split('@')[0]}_{timestamp}"
+            email_parts = alias_email.split('@')
+            email_prefix = email_parts[0] if len(email_parts) > 0 else "unknown"
+            folder_name = f"Video_Submission_{question_id}_{email_prefix}_{timestamp}"
             
             folder = self.service.files().create(
                 body={
@@ -3155,14 +3189,22 @@ class AudioAnalyzer:
         """Extract and cache basic audio features used across multiple analysis methods."""
         y, sr = _self._load_audio_data(audio_path)
         
+        # Extract features with validation
+        rms = librosa.feature.rms(y=y, frame_length=frame_length, hop_length=hop_length)
+        zcr = librosa.feature.zero_crossing_rate(y, frame_length=frame_length, hop_length=hop_length)
+        spectral_centroid = librosa.feature.spectral_centroid(y=y, sr=sr, hop_length=hop_length)
+        mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+        spectral_bandwidth = librosa.feature.spectral_bandwidth(y=y, sr=sr)
+        
+        # Validate feature extraction results
         features = {
             'audio_data': y,
             'sample_rate': sr,
-            'rms': librosa.feature.rms(y=y, frame_length=frame_length, hop_length=hop_length)[0],
-            'zcr': librosa.feature.zero_crossing_rate(y, frame_length=frame_length, hop_length=hop_length)[0],
-            'spectral_centroid': librosa.feature.spectral_centroid(y=y, sr=sr, hop_length=hop_length)[0],
-            'mfccs': librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13),
-            'spectral_bandwidth': librosa.feature.spectral_bandwidth(y=y, sr=sr)[0]
+            'rms': rms[0] if rms.shape[0] > 0 and rms.shape[1] > 0 else np.array([0]),
+            'zcr': zcr[0] if zcr.shape[0] > 0 and zcr.shape[1] > 0 else np.array([0]),
+            'spectral_centroid': spectral_centroid[0] if spectral_centroid.shape[0] > 0 and spectral_centroid.shape[1] > 0 else np.array([0]),
+            'mfccs': mfccs,
+            'spectral_bandwidth': spectral_bandwidth[0] if spectral_bandwidth.shape[0] > 0 and spectral_bandwidth.shape[1] > 0 else np.array([0])
         }
         return features
 
@@ -3232,7 +3274,7 @@ class AudioAnalyzer:
                         voice_segments.append((start_time, end_time))
                     in_segment = False
             
-            if in_segment and times[-1] - start_time > 0.2:
+            if in_segment and len(times) > 0 and times[-1] - start_time > 0.2:
                 voice_segments.append((start_time, times[-1]))
 
             if len(voice_segments) == 0 and np.mean(rms) > noise_floor * 5:
@@ -5587,15 +5629,24 @@ class ApplicationRunner:
                     ScreenManager.navigate_to_screen('input')
             
         except Exception as e:
-            logger.error(f"Application error: {e}")
+            logger.error(f"Application error: {e}", exc_info=True)
             st.error(f"❌ System error: {str(e)}")
+            
+            # Reset to input screen on error
+            if hasattr(st.session_state, 'current_screen'):
+                st.session_state.current_screen = 'input'
             
             st.markdown("""
             **Recovery Options:**
+            - Click the button below to return to the input screen
             - Refresh the page to start a new session
             - Try with a smaller video file
             - Contact support if the problem persists
             """)
+            
+            if st.button("🔄 Return to Input Screen", type="primary"):
+                st.session_state.current_screen = 'input'
+                st.rerun()
 
 
 # Run the application when imported by st.navigation()
