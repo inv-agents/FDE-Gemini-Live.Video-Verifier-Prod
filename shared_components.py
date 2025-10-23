@@ -207,8 +207,13 @@ class SessionManager:
     def create_session(self, session_id: str) -> str:
         """Create a new session directory and return its path."""
         session_dir = self._session_base_dir / session_id
+        already_exists = session_dir.exists()
         session_dir.mkdir(exist_ok=True)
-        logger.info(f"Created session directory: {session_dir}")
+        
+        # Only log when actually creating a new directory
+        if not already_exists:
+            logger.info(f"Created session directory: {session_dir}")
+        
         return str(session_dir)
     
     def get_session_directory(self, session_id: str) -> Optional[str]:
@@ -377,23 +382,29 @@ class GlobalSidebar:
             
             **1. Input Parameters** 📝
             - Enter authorized **Question ID** and **Alias Email**
-            - Upload **MP4 video** (portrait, 30s+ duration)
+            - Provide **Initial Prompt** used in both conversations
+            - Enter **Agent Email** for submission tracking
+            - Select **Quality Comparison** (Gemini vs Competitor rating)
+            - Upload **two MP4 videos**: **Gemini** and **Competitor** (portrait, 30s+ duration each)
 
             **2. Video Analysis** 🔍
-            - System checks for: "2.5 Flash", "Roaring Tiger", "Eval Mode"
-            - Analyzes language fluency and voice audibility
-            - Review results and screenshots
+            - System analyzes **both videos** independently
+            - Checks for: "2.5 Flash", "Roaring Tiger", "Eval Mode: Native Audio Output" (Gemini video)
+            - Note: Competitor video may show different Eval Mode (e.g., "Server Text-to-Speech")
+            - Analyzes language fluency and voice audibility for both
+            - Review results and screenshots for each video
 
-            **3. Submit Video** 📤
-            - Pass quality checks to get Google Drive link
-            - Upload video to provided folder
+            **3. Submit Videos** 📤
+            - Pass quality checks to get Google Drive links
+            - Upload both videos to provided folders
             
-            ### 🎯 Quality Requirements
+            ### 🎯 Quality Requirements (Gemini Video)
             - ✅ Use **"2.5 Flash"** (not "2.5 Pro")
             - ✅ Set alias to **"Roaring Tiger"**
-            - ✅ Enable **"Eval Mode: Native Audio Output"**
-            - ✅ Ensure **both voices audible**
-            - ✅ Speak in **expected language**
+            - ✅ Enable **"Eval Mode: Native Audio Output"** (Gemini)
+            - ✅ Ensure **both voices audible** (in both videos)
+            - ✅ Speak in **expected language** (in both videos)
+            - ✅ Competitor may use different Eval Mode
             
             ---
             
@@ -424,7 +435,8 @@ class GlobalSidebar:
             session_html = f"""
             <div style="background: linear-gradient(135deg, #e8f5e8 0%, #f0f8f0 100%); padding: 15px; border-radius: 8px; border-left: 4px solid #4CAF50; margin-bottom: 15px;">
                 <h4 style="margin: 0 0 10px 0; color: #2e7d32;">Session ID: <code style="background: #e0e0e0; padding: 2px 4px; border-radius: 3px; font-size: 0.7em;">{session_info['session_id']}</code></h4>
-                <p style="margin: 5px 0; color: #333;"><strong>Question ID:</strong><br>{session_info['question_id']}</p>"""
+                <p style="margin: 5px 0; color: #333;"><strong>Question ID:</strong><br>{session_info['question_id']}</p>
+                <p style="margin: 5px 0; color: #333;"><strong>Alias Email:</strong><br>{session_info.get('email', '')}</p>"""
             
             session_html += f"""
                 <p style="margin: 5px 0; color: #333;"><strong>Agent Email:</strong><br>{session_info.get('agent_email', '')}</p>

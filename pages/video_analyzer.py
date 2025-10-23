@@ -1,8 +1,9 @@
 """
 Gemini Live Video Verifier Tool for Multi-Modal Content Detection.
 
-A video analysis tool that provides text recognition, language fluency analysis, and speaker diarization.
-The tool includes quality assurance validation and a multi-screen Streamlit interface.
+A dual-video comparison tool that analyzes both Gemini and Competitor videos, providing text recognition,
+language fluency analysis, and speaker diarization. The tool includes quality assurance validation for both
+videos and a multi-screen Streamlit interface.
 """
 
 import gc
@@ -59,7 +60,7 @@ class TargetTexts:
     """Target text definitions for detection."""
     FLASH_TEXT = "2.5 Flash"
     ALIAS_NAME_TEXT = "Roaring tiger"
-    EVAL_MODE_TEXT = "Eval Mode: Native Audio Output"
+    EVAL_MODE_TEXT = "Eval Mode: A2T with TTS"
 
 
 class DetectionType(Enum):
@@ -230,7 +231,7 @@ class GoogleCloudStorageManager:
             return None
     
     def upload_video(self, file_data, filename: str, content_type: str = "video/mp4") -> Optional[str]:
-        """Upload video to GCS using resumable upload for large files, extract metadata, and return signed URL."""
+        """Upload video to GCS and return signed URL. Chunking handled by streamlit-chunk-file-uploader."""
         if not self.bucket:
             logger.error("GCS bucket not available")
             return None
@@ -239,66 +240,34 @@ class GoogleCloudStorageManager:
             blob_name = f"videos/{filename}"
             blob = self.bucket.blob(blob_name)
             
-            # Save file temporarily to extract metadata
-            import tempfile
+            # Extract basic metadata for validation (using temp file)
+            file_data.seek(0)
             with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_file:
-                file_data.seek(0)
                 temp_file.write(file_data.read())
                 temp_path = temp_file.name
             
-            # Get file size
-            file_data.seek(0, 2)  # Seek to end
-            file_size = file_data.tell()
-            file_data.seek(0)  # Reset to beginning
-            
-            # Extract video metadata
-            metadata = {}
             try:
                 cap = cv2.VideoCapture(temp_path)
                 if cap.isOpened():
-                    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                    fps = cap.get(cv2.CAP_PROP_FPS)
-                    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                    duration = total_frames / fps if fps > 0 else 0.0
-                    
                     metadata = {
-                        'width': str(width),
-                        'height': str(height),
-                        'fps': str(fps),
-                        'duration': str(duration),
-                        'total_frames': str(total_frames)
+                        'width': str(int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))),
+                        'height': str(int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))),
+                        'fps': str(cap.get(cv2.CAP_PROP_FPS)),
+                        'total_frames': str(int(cap.get(cv2.CAP_PROP_FRAME_COUNT)))
                     }
+                    fps = float(metadata['fps'])
+                    frames = int(metadata['total_frames'])
+                    metadata['duration'] = str(frames / fps if fps > 0 else 0.0)
                     cap.release()
-            except Exception as e:
-                logger.warning(f"Could not extract video metadata: {e}")
+                    blob.metadata = metadata
             finally:
-                # Clean up temp file
-                try:
-                    os.unlink(temp_path)
-                except:
-                    pass
+                os.unlink(temp_path)
             
-            # Set metadata
-            blob.metadata = metadata
-            
-            # Use resumable upload for files larger than 30MB to avoid GCR 32MB limit
+            # Upload to GCS (chunking handled by streamlit-chunk-file-uploader)
             file_data.seek(0)
-            if file_size > 30 * 1024 * 1024:  # 30MB threshold
-                logger.info(f"Using resumable upload for large file: {file_size / (1024*1024):.2f} MB")
-                # Resumable upload with 5MB chunk size
-                blob.chunk_size = 5 * 1024 * 1024  # 5MB chunks
-                blob.upload_from_file(
-                    file_data, 
-                    content_type=content_type, 
-                    rewind=True,
-                    checksum=None  # Disable checksum for faster uploads
-                )
-            else:
-                # Regular upload for smaller files
-                blob.upload_from_file(file_data, content_type=content_type, rewind=True)
+            blob.upload_from_file(file_data, content_type=content_type, rewind=True)
             
-            # Generate a signed URL valid for 7 days (maximum analysis time)
+            # Generate signed URL (7 days expiration)
             from datetime import timedelta
             signed_url = blob.generate_signed_url(
                 version="v4",
@@ -306,7 +275,8 @@ class GoogleCloudStorageManager:
                 method="GET"
             )
             
-            logger.info(f"Video uploaded successfully with metadata: {blob_name} ({file_size / (1024*1024):.2f} MB)")
+            file_size = blob.size or 0
+            logger.info(f"Video uploaded successfully: {blob_name} ({file_size / (1024*1024):.2f} MB)")
             return signed_url
             
         except Exception as e:
@@ -400,14 +370,15 @@ class GoogleCloudStorageManager:
             return None
     
     def download_video_to_temp(self, video_url: str, session_id: str) -> Optional[str]:
-        """Download video from URL to temporary file."""
+        """Download video from URL to temporary file in existing session directory."""
         try:
             session_manager = get_session_manager()
             
-            # Ensure session directory exists
+            # Get existing session directory - don't create new one
             session_dir = session_manager.get_session_directory(session_id)
             if not session_dir:
-                session_dir = session_manager.create_session(session_id)
+                logger.error(f"Session directory not found for session_id: {session_id}")
+                return None
             
             temp_path = session_manager.create_temp_file(session_id, "video", ".mp4")
             
@@ -499,6 +470,14 @@ class ScreenManager:
             st.session_state.feedback_processed = False
         if 'submission_locked' not in st.session_state:
             st.session_state.submission_locked = False
+        if 'gemini_video_temp_path' not in st.session_state:
+            st.session_state.gemini_video_temp_path = None
+        if 'competitor_video_temp_path' not in st.session_state:
+            st.session_state.competitor_video_temp_path = None
+        if 'gemini_video_uploading' not in st.session_state:
+            st.session_state.gemini_video_uploading = False
+        if 'competitor_video_uploading' not in st.session_state:
+            st.session_state.competitor_video_uploading = False
         if 'failed_video_uploaded' not in st.session_state:
             st.session_state.failed_video_uploaded = False
         if 'quality_comparison' not in st.session_state:
@@ -734,11 +713,18 @@ class InputScreen:
                 chunk_size=31  # 31MB chunks to stay under GCR 32MB limit
             )
             
-            if gemini_video and not st.session_state.get('gemini_video_url'):
+            # Only process upload if video exists, not already uploaded, and not currently uploading
+            if (gemini_video and 
+                not st.session_state.get('gemini_video_url') and 
+                not st.session_state.get('gemini_video_uploading')):
+                
                 # Check if it's an MP4 file
                 if not gemini_video.name.lower().endswith('.mp4'):
                     st.error("❌ Please upload an MP4 video file")
                 else:
+                    # Set uploading flag to prevent duplicate uploads
+                    st.session_state.gemini_video_uploading = True
+                    
                     with st.spinner("Uploading Gemini video to cloud..."):
                         gcs_manager = GoogleCloudStorageManager()
                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -747,8 +733,10 @@ class InputScreen:
                         if url:
                             st.session_state.gemini_video_url = url
                             st.session_state.gemini_video_blob_name = f"videos/{filename}"
+                            st.session_state.gemini_video_uploading = False
                         else:
                             st.error("❌ Failed to upload Gemini video")
+                            st.session_state.gemini_video_uploading = False
             
             if st.session_state.get('gemini_video_url'):
                 st.success("✅ Gemini video ready")
@@ -761,11 +749,18 @@ class InputScreen:
                 chunk_size=31  # 31MB chunks to stay under GCR 32MB limit
             )
             
-            if competitor_video and not st.session_state.get('competitor_video_url'):
+            # Only process upload if video exists, not already uploaded, and not currently uploading
+            if (competitor_video and 
+                not st.session_state.get('competitor_video_url') and 
+                not st.session_state.get('competitor_video_uploading')):
+                
                 # Check if it's an MP4 file
                 if not competitor_video.name.lower().endswith('.mp4'):
                     st.error("❌ Please upload an MP4 video file")
                 else:
+                    # Set uploading flag to prevent duplicate uploads
+                    st.session_state.competitor_video_uploading = True
+                    
                     with st.spinner("Uploading Competitor video to cloud..."):
                         gcs_manager = GoogleCloudStorageManager()
                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -774,8 +769,10 @@ class InputScreen:
                         if url:
                             st.session_state.competitor_video_url = url
                             st.session_state.competitor_video_blob_name = f"videos/{filename}"
+                            st.session_state.competitor_video_uploading = False
                         else:
                             st.error("❌ Failed to upload Competitor video")
+                            st.session_state.competitor_video_uploading = False
             
             if st.session_state.get('competitor_video_url'):
                 st.success("✅ Competitor video ready")
@@ -807,16 +804,16 @@ class InputScreen:
                     inferred_task_type
                 )
         else:
-            st.info(f"⏳ **Minimum Video Duration Required**: {Config.MIN_VIDEO_DURATION} seconds")
-            st.info("📱 **Video Resolution**: Video must have standard mobile phone resolution")
+            st.info(f"⏳ **Minimum Video Duration Required**: {Config.MIN_VIDEO_DURATION} seconds (for both videos)")
+            st.info("📱 **Video Resolution**: Both videos must have standard portrait mobile phone resolution")
             
             if question_id:
                 language_display = Config.get_language_display_name(inferred_language) or inferred_language
-                st.info(f"🗣️ **Target Language**: {language_display}")
+                st.info(f"🗣️ **Target Language**: {language_display} (both videos should use the same language)")
                 task_display = inferred_task_type if inferred_task_type != 'Unknown' else "Will be inferred from Question ID"
                 st.info(f"🎯 **Task Type**: {task_display}")
             else:
-                st.info("🗣️ **Target Language**: Will be inferred from Question ID")
+                st.info("🗣️ **Target Language**: Will be inferred from Question ID (both videos should use the same language)")
                 st.info("🎯 **Task Type**: Will be inferred from Question ID")
 
     @staticmethod
@@ -1047,7 +1044,7 @@ class AnalysisScreen:
         try:
             session_id = st.session_state.session_id
             
-            # Create session directory for analysis
+            # Ensure session directory exists once at the start
             session_manager = get_session_manager()
             session_dir = session_manager.get_session_directory(session_id)
             if not session_dir:
@@ -1125,16 +1122,26 @@ class AnalysisScreen:
     
     @staticmethod
     def _prepare_video_for_analysis(video_type: str, gcs_manager, session_id, progress_bar) -> Optional[str]:
-        """Prepare video for analysis by downloading from GCS."""
+        """Prepare video for analysis by checking cached path or downloading from GCS."""
         url_key = f'{video_type}_video_url'
+        temp_path_key = f'{video_type}_video_temp_path'
         
-        # Always download video fresh for analysis (don't rely on temp files from validation)
+        # Check if video is already downloaded and file still exists
+        existing_path = st.session_state.get(temp_path_key)
+        if existing_path and os.path.exists(existing_path) and os.path.getsize(existing_path) > 0:
+            logger.info(f"Reusing existing {video_type} video from: {existing_path}")
+            progress_bar.progress(10, text=f"{video_type.capitalize()} video ready for analysis...")
+            return existing_path
+        
+        # Download video fresh for analysis
         progress_bar.progress(5, text=f"Downloading {video_type} video from cloud...")
         video_path = gcs_manager.download_video_to_temp(
             getattr(st.session_state, url_key), session_id
         )
         
         if video_path:
+            # Store temp path for reuse
+            setattr(st.session_state, temp_path_key, video_path)
             progress_bar.progress(10, text=f"{video_type.capitalize()} video ready for analysis...")
         
         return video_path
@@ -1403,7 +1410,7 @@ class AnalysisScreen:
         
         render_detection_section(flash_results, "2.5 Flash Text Detection", "2.5 Flash", handle_flash_not_found)
         render_detection_section(alias_results, "Alias Name Text Detection", "Roaring tiger")
-        render_detection_section(eval_results, "Eval Mode Text Detection", "Eval Mode: Native Audio Output")
+        render_detection_section(eval_results, "Eval Mode Text Detection", "Eval Mode")
 
     @staticmethod
     def _render_feedback_section():
@@ -1515,9 +1522,7 @@ class AnalysisScreen:
         try:
             question_id = st.session_state.get('question_id')
             alias_email = st.session_state.get('alias_email')
-            session_id = st.session_state.get('session_id')
             
-            gcs_manager = GoogleCloudStorageManager()
             drive_integration = GoogleDriveIntegration()
             
             if not drive_integration.service:
@@ -1527,46 +1532,38 @@ class AnalysisScreen:
             gemini_drive_link = None
             competitor_drive_link = None
             
-            # Upload Gemini video if it failed
+            # Upload Gemini video if it failed (use cached temp path)
             if not gemini_passed:
-                gemini_video_url = st.session_state.get('gemini_video_url')
-                if gemini_video_url:
-                    video_temp_path = gcs_manager.download_video_to_temp(gemini_video_url, session_id)
-                    if video_temp_path and os.path.exists(video_temp_path):
-                        gemini_drive_link = drive_integration.upload_video_to_shared_drive(
-                            video_temp_path, question_id, alias_email, passed_qa=False
-                        )
-                        if gemini_drive_link:
-                            logger.info(f"Failed Gemini video silently uploaded for {question_id}")
-                            st.session_state.gemini_drive_link = gemini_drive_link
-                        else:
-                            logger.warning(f"Failed to upload Gemini video for {question_id}")
+                gemini_video_path = st.session_state.get('gemini_video_temp_path')
+                if gemini_video_path and os.path.exists(gemini_video_path):
+                    gemini_drive_link = drive_integration.upload_video_to_shared_drive(
+                        gemini_video_path, question_id, alias_email, passed_qa=False
+                    )
+                    if gemini_drive_link:
+                        logger.info(f"Failed Gemini video silently uploaded for {question_id}")
+                        st.session_state.gemini_drive_link = gemini_drive_link
                     else:
-                        logger.warning(f"Could not download Gemini video for failed upload: {question_id}")
+                        logger.warning(f"Failed to upload Gemini video for {question_id}")
                 else:
-                    logger.warning("No Gemini video URL found for failed video upload")
+                    logger.warning(f"Gemini video temp path not found for failed upload: {question_id}")
             else:
                 # If Gemini passed, use the GCS URL (it won't be uploaded to failed folder)
                 gemini_drive_link = st.session_state.get('gemini_video_url', '')
             
-            # Upload Competitor video if it failed
+            # Upload Competitor video if it failed (use cached temp path)
             if not competitor_passed:
-                competitor_video_url = st.session_state.get('competitor_video_url')
-                if competitor_video_url:
-                    video_temp_path = gcs_manager.download_video_to_temp(competitor_video_url, session_id)
-                    if video_temp_path and os.path.exists(video_temp_path):
-                        competitor_drive_link = drive_integration.upload_video_to_shared_drive(
-                            video_temp_path, question_id, alias_email, passed_qa=False
-                        )
-                        if competitor_drive_link:
-                            logger.info(f"Failed Competitor video silently uploaded for {question_id}")
-                            st.session_state.competitor_drive_link = competitor_drive_link
-                        else:
-                            logger.warning(f"Failed to upload Competitor video for {question_id}")
+                competitor_video_path = st.session_state.get('competitor_video_temp_path')
+                if competitor_video_path and os.path.exists(competitor_video_path):
+                    competitor_drive_link = drive_integration.upload_video_to_shared_drive(
+                        competitor_video_path, question_id, alias_email, passed_qa=False
+                    )
+                    if competitor_drive_link:
+                        logger.info(f"Failed Competitor video silently uploaded for {question_id}")
+                        st.session_state.competitor_drive_link = competitor_drive_link
                     else:
-                        logger.warning(f"Could not download Competitor video for failed upload: {question_id}")
+                        logger.warning(f"Failed to upload Competitor video for {question_id}")
                 else:
-                    logger.warning("No Competitor video URL found for failed video upload")
+                    logger.warning(f"Competitor video temp path not found for failed upload: {question_id}")
             else:
                 # If Competitor passed, use the GCS URL (it won't be uploaded to failed folder)
                 competitor_drive_link = st.session_state.get('competitor_video_url', '')
@@ -2388,9 +2385,9 @@ class VideoSubmissionScreen:
         st.info(f"""
         **Video Submission:**
         
-        Your Gemini and Competitor videos passed all quality checks and are ready for submission.
-        Both videos will be uploaded to the **Passed_Submissions** folder.
-        Click the "Submit Both Videos" button below to finalize.
+        Both your Gemini and Competitor videos passed all quality checks and are ready for submission.
+        Each video will be uploaded to the **Passed_Submissions** folder with its respective label.
+        Click the "Submit Both Videos" button below to finalize your submission.
         """)
         
         # Display video information
@@ -2440,21 +2437,31 @@ class VideoSubmissionScreen:
                 st.session_state.upload_in_progress = False
                 return
 
-            # Download Gemini video from GCS if needed
+            # Reuse Gemini video from analysis if available
             gemini_video_path = st.session_state.get('gemini_video_temp_path')
             if not gemini_video_path or not os.path.exists(gemini_video_path):
-                logger.warning("Gemini video temp path not found, downloading from URL")
+                logger.info("Gemini video temp path not found or expired, downloading from GCS")
                 gemini_video_path = gcs_manager.download_video_to_temp(
                     st.session_state.gemini_video_url, session_id
                 )
+                # Update session state with new path
+                if gemini_video_path:
+                    st.session_state.gemini_video_temp_path = gemini_video_path
+            else:
+                logger.info(f"Reusing Gemini video from analysis: {gemini_video_path}")
             
-            # Download Competitor video from GCS if needed
+            # Reuse Competitor video from analysis if available
             competitor_video_path = st.session_state.get('competitor_video_temp_path')
             if not competitor_video_path or not os.path.exists(competitor_video_path):
-                logger.warning("Competitor video temp path not found, downloading from URL")
+                logger.info("Competitor video temp path not found or expired, downloading from GCS")
                 competitor_video_path = gcs_manager.download_video_to_temp(
                     st.session_state.competitor_video_url, session_id
                 )
+                # Update session state with new path
+                if competitor_video_path:
+                    st.session_state.competitor_video_temp_path = competitor_video_path
+            else:
+                logger.info(f"Reusing Competitor video from analysis: {competitor_video_path}")
 
             # Upload both videos to Passed_Submissions folder
             gemini_link = None
@@ -2563,7 +2570,7 @@ class VideoSubmissionScreen:
 
     @staticmethod
     def _render_submission_success():
-        st.success("✅ Both videos uploaded successfully to Passed_Submissions. Your submission is now locked. Review the session summary below.")
+        st.success("✅ Both Gemini and Competitor videos uploaded successfully to Passed_Submissions. Your submission is now locked. Review the session summary below.")
         
         VideoSubmissionScreen._render_session_summary()
         
@@ -3667,7 +3674,10 @@ class VideoContentAnalyzer:
         self.session_manager = get_session_manager()
         self.session_id = session_id or self.session_manager.generate_session_id()
         
-        self.session_dir = self.session_manager.create_session(self.session_id)
+        # Reuse existing session directory if it exists
+        self.session_dir = self.session_manager.get_session_directory(self.session_id)
+        if not self.session_dir:
+            self.session_dir = self.session_manager.create_session(self.session_id)
         
         self.rules: List[DetectionRule] = []
         self.results: List[DetectionResult] = []
@@ -4891,9 +4901,9 @@ def create_detection_rules(target_language: str, task_type: str = 'Monolingual',
     
     # Different eval mode text based on video type
     if video_type.lower() == 'gemini':
-        eval_mode_text = "Eval Mode: A2A with voiceLM"
+        eval_mode_text = "Eval Mode: Live OR Rev 22 Candidate v2"
     else:  # Competitor
-        eval_mode_text = TargetTexts.EVAL_MODE_TEXT  # "Eval Mode: Native Audio Output"
+        eval_mode_text = TargetTexts.EVAL_MODE_TEXT
     
     text_rules_config = [
         (f"Text Detection: {TargetTexts.FLASH_TEXT}", TargetTexts.FLASH_TEXT),
@@ -4998,70 +5008,9 @@ class StreamlitInterface:
         <div class="step-indicator">
             <div class="step {input_state}"><span>1️⃣ Input Parameters</span></div>
             <div class="step {analysis_state}"><span>2️⃣ Video Analysis</span></div>
-            <div class="step {qa_state}"><span>3️⃣ Submit Video</span></div>
+            <div class="step {qa_state}"><span>3️⃣ Submit Videos</span></div>
         </div>
         """, unsafe_allow_html=True)
-
-    @staticmethod
-    def create_temp_video(video_file, session_id: str = None):
-        """Create temporary video file. Returns (path, [path]) or (None, [])."""
-        if not video_file:
-            return None, []
-        
-        session_id = session_id or get_session_manager().generate_session_id()
-        
-        video_key = f"temp_video_{session_id}_{video_file.name}_{getattr(video_file, 'size', 0)}"
-        if video_key in st.session_state and os.path.exists(st.session_state[video_key]):
-            cached_path = st.session_state[video_key]
-            logger.debug(f"Using cached video file: {cached_path}")
-            return cached_path, [cached_path]
-        
-        temp_path = None
-        try:
-            if hasattr(video_file, 'size') and video_file.size > Config.MAX_FILE_SIZE:
-                st.error(f"File too large: {video_file.size / 1024 / 1024:.1f}MB (max: {Config.MAX_FILE_SIZE / 1024 / 1024:.1f}MB)")
-                return None, []
-            
-            video_file.seek(0)
-            
-            video_suffix = Path(video_file.name).suffix.lower()
-            with tempfile.NamedTemporaryFile(delete=False, suffix=video_suffix, prefix=f"video_{session_id}_") as tmp:
-                temp_path = tmp.name
-                total_bytes = 0
-                chunk_size = 1024 * 1024
-                
-                while True:
-                    chunk = video_file.read(chunk_size)
-                    if not chunk:
-                        break
-                    tmp.write(chunk)
-                    total_bytes += len(chunk)
-                
-                tmp.flush()
-                os.fsync(tmp.fileno())
-            
-            if not os.path.exists(temp_path):
-                raise RuntimeError("File was not created successfully")
-            
-            st.session_state[video_key] = temp_path
-            logger.info(f"Upload completed: {total_bytes} bytes written in chunks")
-            return temp_path, [temp_path]
-                    
-        except MemoryError:
-            st.error("❌ Insufficient memory to process this video file. Please try with a smaller file.")
-            logger.error(f"Memory error during video upload")
-            return None, []
-        except Exception as e:
-            logger.error(f"Video upload failed: {e}")
-            st.error(f"Failed to process uploaded video: {str(e)}")
-            return None, []
-        finally:
-            if temp_path and not os.path.exists(temp_path):
-                try:
-                    os.unlink(temp_path)
-                except:
-                    pass
-            gc.collect()
 
 
 class QualityAssuranceChecker:
@@ -5224,33 +5173,33 @@ class QualityAssuranceChecker:
         """Check if the correct eval mode appears in text detection based on video type."""
         # Different validation based on video type
         if self.video_type.lower() == 'gemini':
-            # For Gemini videos, look for "Eval Mode: A2A with voiceLM"
+            # For Gemini videos, look for "Eval Mode: Live OR Rev 22 Candidate v2"
             return self._check_text_detection(
                 filter_keywords=['text', 'ocr', 'eval'],
-                target_keywords=['eval', 'mode', 'a2a', 'voicelm'],
-                patterns=['eval mode', 'a2a', 'voicelm', 'eval mode: a2a with voicelm'],
-                success_message="✅ 'Eval Mode: A2A with voiceLM' mode found with OCR text detections. Correct usage confirmed.",
-                failure_message="❌ 'Eval Mode: A2A with voiceLM' mode was not found in any OCR text detections. Please ensure to use the correct mode and try again.",
+                target_keywords=['eval', 'mode', 'live', 'rev', '22', 'candidate', 'v2'],
+                patterns=['eval mode', 'live', 'rev 22 candidate v2', 'eval mode: live or rev 22 candidate v2'],
+                success_message="✅ 'Eval Mode: Live OR Rev 22 Candidate v2' mode found with OCR text detections. Correct usage confirmed.",
+                failure_message="❌ 'Eval Mode: Live OR Rev 22 Candidate v2' mode was not found in any OCR text detections. Please ensure to use the correct mode and try again.",
                 result_key='eval_mode_found',
                 count_key='eval_mode_count',
                 custom_pattern_check=lambda detected_text, patterns: (
-                    ('eval mode' in detected_text and 'a2a' in detected_text and 'voicelm' in detected_text) or 
-                    'eval mode: a2a with voicelm' in detected_text
+                    ('eval mode' in detected_text and 'live' in detected_text and 'rev 22 candidate v2' in detected_text) or 
+                    'eval mode: live or rev 22 candidate v2' in detected_text
                 )
             )
         else:
-            # For Competitor videos, look for "Eval Mode: Native Audio Output"
+            # For Competitor videos, look for "Eval Mode: A2T with TTS"
             return self._check_text_detection(
                 filter_keywords=['text', 'ocr', 'eval'],
-                target_keywords=['eval', 'mode', 'native', 'audio'],
-                patterns=['eval mode', 'native audio', 'eval mode: native audio output'],
-                success_message="✅ 'Eval Mode: Native Audio Output' mode found with OCR text detections. Correct usage confirmed.",
-                failure_message="❌ 'Eval Mode: Native Audio Output' mode was not found in any OCR text detections. Please ensure to use the correct mode and try again.",
+                target_keywords=['eval', 'mode', 'a2t', 'tts'],
+                patterns=['eval mode', 'a2t with tts', 'eval mode: a2t with tts'],
+                success_message="✅ 'Eval Mode: A2T with TTS' mode found with OCR text detections. Correct usage confirmed.",
+                failure_message="❌ 'Eval Mode: A2T with TTS' mode was not found in any OCR text detections. Please ensure to use the correct mode and try again.",
                 result_key='eval_mode_found',
                 count_key='eval_mode_count',
                 custom_pattern_check=lambda detected_text, patterns: (
-                    ('eval mode' in detected_text and 'native audio' in detected_text) or 
-                    'eval mode: native audio output' in detected_text
+                    ('eval mode' in detected_text and 'a2t with tts' in detected_text) or 
+                    'eval mode: a2t with tts' in detected_text
                 )
             )
 
@@ -5487,23 +5436,27 @@ class ApplicationRunner:
                         <div style="margin: 0; color: #e2e8f0; line-height: 1.7;">
                             <div style="margin-bottom: 12px; display: flex; align-items: flex-start; gap: 12px;">
                                 <div style="background: linear-gradient(135deg, #2196F3, #1976D2); color: white; border-radius: 50%; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: bold; flex-shrink: 0; margin-top: 2px;">1</div>
-                                <div>Enter your unique <strong>Question ID</strong> and authorized <strong>Alias Email</strong> address. The system will automatically verify these credentials and infer the target language from your Question ID.</div>
+                                <div>Enter your unique <strong>Question ID</strong> and authorized <strong>Alias Email</strong> address. Provide the <strong>Initial Prompt</strong> used in both conversations and your <strong>Agent Email</strong>. The system will automatically verify credentials and infer the target language from your Question ID.</div>
                             </div>
                             <div style="margin-bottom: 12px; display: flex; align-items: flex-start; gap: 12px;">
                                 <div style="background: linear-gradient(135deg, #2196F3, #1976D2); color: white; border-radius: 50%; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: bold; flex-shrink: 0; margin-top: 2px;">2</div>
-                                <div>Upload your video file in <strong>MP4 format</strong> with a maximum size of <strong>200MB</strong>, minimum duration of <strong>30 seconds</strong>, and <strong>portrait mobile resolution</strong>. The system will validate these requirements before proceeding.</div>
+                                <div>Select your <strong>Quality Comparison</strong> rating to assess Gemini's performance relative to the Competitor (from "much better" to "much worse"). This helps track quality differences between both systems.</div>
                             </div>
                             <div style="margin-bottom: 12px; display: flex; align-items: flex-start; gap: 12px;">
                                 <div style="background: linear-gradient(135deg, #2196F3, #1976D2); color: white; border-radius: 50%; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: bold; flex-shrink: 0; margin-top: 2px;">3</div>
-                                <div>The system will automatically analyze your video for <strong>text detection</strong>, <strong>language fluency verification</strong>, and <strong>voice audibility quality</strong> to ensure all requirements are met.</div>
+                                <div>Upload <strong>two MP4 videos</strong> (Gemini and Competitor) with a maximum size of <strong>200MB each</strong>, minimum duration of <strong>30 seconds</strong>, and <strong>portrait mobile resolution</strong>. Note: Gemini must use "Eval Mode: Live OR Rev 22 Candidate v2" while Competitor may use "Eval Mode: A2T with TTS".</div>
                             </div>
                             <div style="margin-bottom: 12px; display: flex; align-items: flex-start; gap: 12px;">
                                 <div style="background: linear-gradient(135deg, #2196F3, #1976D2); color: white; border-radius: 50%; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: bold; flex-shrink: 0; margin-top: 2px;">4</div>
-                                <div>Review the comprehensive <strong>analysis results</strong> and <strong>quality assurance checks</strong>. The system will indicate whether your video passes all requirements or if any issues need to be addressed.</div>
+                                <div>The system will automatically analyze <strong>both videos independently</strong> for <strong>text detection</strong> (Gemini only), <strong>language fluency verification</strong> (both videos), and <strong>voice audibility quality</strong> (both videos) to ensure all requirements are met.</div>
                             </div>
                             <div style="margin-bottom: 12px; display: flex; align-items: flex-start; gap: 12px;">
                                 <div style="background: linear-gradient(135deg, #2196F3, #1976D2); color: white; border-radius: 50%; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: bold; flex-shrink: 0; margin-top: 2px;">5</div>
-                                <div>If your video passes all checks, you'll have the functionality to upload your video to Google Drive.</div>
+                                <div>Review the comprehensive <strong>analysis results</strong> and <strong>quality assurance checks</strong> for both videos. The system will indicate whether each video passes all requirements or if any issues need to be addressed before submission.</div>
+                            </div>
+                            <div style="margin-bottom: 12px; display: flex; align-items: flex-start; gap: 12px;">
+                                <div style="background: linear-gradient(135deg, #2196F3, #1976D2); color: white; border-radius: 50%; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: bold; flex-shrink: 0; margin-top: 2px;">6</div>
+                                <div>If <strong>both videos</strong> pass all checks, you'll have the functionality to upload them to separate Google Drive folders for final submission.</div>
                             </div>
                         </div>
                     </div>

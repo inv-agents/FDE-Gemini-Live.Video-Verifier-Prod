@@ -1,8 +1,9 @@
 """
 Gemini Live Video Verifier Tool - Main Entry Point
 
-A video analysis tool that provides text recognition, language fluency analysis, and speaker diarization.
-The tool includes quality assurance validation and a multi-page Streamlit interface.
+A dual-video comparison tool that analyzes both Gemini and Competitor videos, providing text recognition,
+language fluency analysis, and speaker diarization. The tool includes quality assurance validation for both
+videos and a multi-page Streamlit interface.
 """
 
 import streamlit as st
@@ -22,12 +23,6 @@ video_analyzer_page = st.Page(
     default=True
 )
 
-metrics_page = st.Page(
-    "pages/metrics.py",
-    title="Metrics",
-    icon="📊"
-)
-
 help_page = st.Page(
     "pages/help.py",
     title="Help",
@@ -36,6 +31,6 @@ help_page = st.Page(
 
 st.logo("assets/inv_logo.jpg", size="large")
 
-pg = st.navigation([video_analyzer_page, metrics_page, help_page])
+pg = st.navigation([video_analyzer_page, help_page])
 
 pg.run()
