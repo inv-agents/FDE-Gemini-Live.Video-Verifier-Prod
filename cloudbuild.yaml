@@ -1,7 +1,7 @@
 substitutions:
   _REGION: "us-central1"
   _AR_REPO: "apps"
-  _SERVICE: "video-verifier"
+  _SERVICE: "video-verifier-prod"
 
 options:
   logging: CLOUD_LOGGING_ONLY
