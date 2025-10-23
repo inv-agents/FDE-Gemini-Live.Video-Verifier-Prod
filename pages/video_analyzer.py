@@ -3328,38 +3328,38 @@ class AudioAnalyzer:
             multi_speaker_score = 0.0
             indicators = []
             
-            # 1. MFCC variation
-            if mid_mfcc_var_ratio > 0.3:
-                score_contrib = min(0.25, (mid_mfcc_var_ratio - 0.3) * 2.5)
+            # 1. MFCC variation with stricter thresholds
+            if mid_mfcc_var_ratio > 0.35:
+                score_contrib = min(0.25, (mid_mfcc_var_ratio - 0.35) * 2.5)
                 multi_speaker_score += score_contrib
                 indicators.append(f"mfcc_var({mid_mfcc_var_ratio:.2f})={score_contrib:.2f}")
                 
-            if delta_var_ratio > 0.35:
-                score_contrib = min(0.25, (delta_var_ratio - 0.35) * 2.0)
+            if delta_var_ratio > 0.40:
+                score_contrib = min(0.25, (delta_var_ratio - 0.40) * 2.0)
                 multi_speaker_score += score_contrib
                 indicators.append(f"delta_var({delta_var_ratio:.2f})={score_contrib:.2f}")
                 
-            # 2. Temporal dynamics
+            # 2. Temporal dynamics with stricter thresholds
             # Only contribute if there's significant variance AND distance
-            if distance_variance > 1.0:
-                score_contrib = min(0.25, (distance_variance - 1.0) / 3)
+            if distance_variance > 1.2:
+                score_contrib = min(0.25, (distance_variance - 1.2) / 3)
                 multi_speaker_score += score_contrib
                 indicators.append(f"temporal_var({distance_variance:.2f})={score_contrib:.2f}")
             
-            if max_distance > 7.0:
-                score_contrib = min(0.15, (max_distance - 7.0) / 15)
+            if max_distance > 8.0:
+                score_contrib = min(0.15, (max_distance - 8.0) / 15)
                 multi_speaker_score += score_contrib
                 indicators.append(f"max_transition({max_distance:.2f})={score_contrib:.2f}")
                 
-            # 3. Pitch-based analysis (using spectral centroid as proxy)
+            # 3. Pitch-based analysis (using spectral centroid as proxy) with stricter thresholds
             if len(pitch_values) > 50:  # Reduced threshold for faster analysis
                 # Check for consistent pitch patterns vs varied patterns
                 pitch_percentiles = np.percentile(pitch_values, [10, 25, 50, 75, 90])
                 pitch_iqr = pitch_percentiles[3] - pitch_percentiles[1]  # Interquartile range
                 
-                # Only contribute if BOTH IQR and range are high
-                if pitch_iqr > 100 and pitch_range > 300:  # Adjusted thresholds for spectral centroid
-                    score_contrib = min(0.2, (pitch_iqr - 100) / 200 * 0.2)
+                # Only contribute if BOTH IQR and range are high (stricter thresholds)
+                if pitch_iqr > 120 and pitch_range > 350:  # Increased thresholds
+                    score_contrib = min(0.2, (pitch_iqr - 120) / 200 * 0.2)
                     multi_speaker_score += score_contrib
                     indicators.append(f"pitch_spread({pitch_iqr:.1f})={score_contrib:.2f}")
                 
@@ -3369,9 +3369,9 @@ class AudioAnalyzer:
                     pitch_hist_norm = pitch_hist / np.sum(pitch_hist)
                     peaks = _self._find_histogram_peaks(pitch_hist_norm)
                     if len(peaks) >= 2:
-                        # Check if peaks are far apart (different speakers)
+                        # Check if peaks are far apart (different speakers) - stricter threshold
                         peak_distance = abs(peaks[1] - peaks[0])
-                        if peak_distance > 2:  # Reduced threshold
+                        if peak_distance > 3:  # Increased threshold
                             score_contrib = min(0.25, peak_distance / 8 * 0.25)
                             multi_speaker_score += score_contrib
                             indicators.append(f"bimodal_pitch={len(peaks)}peaks,dist={peak_distance}")
@@ -3383,13 +3383,14 @@ class AudioAnalyzer:
             total_duration = vad_info.get('audio_duration', 0)
             
             # Early exit optimization: clear single speaker pattern
-            if voice_ratio < 0.3 and total_duration < 15:
+            # More conservative - only exit early if very confident it's single speaker
+            if voice_ratio < 0.35 and total_duration < 20 and distance_variance < 0.8:
                 return {
                     'estimated_speakers': 1,
-                    'confidence': 0.88,
+                    'confidence': 0.90,
                     'feature_variance_ratio': float(mid_mfcc_var_ratio),
                     'has_multiple_speakers': False,
-                    'multi_speaker_score': -0.3,
+                    'multi_speaker_score': -0.5,
                     'distance_variance': float(distance_variance),
                     'max_distance': float(max_distance),
                     'audio_features': {
@@ -3402,53 +3403,60 @@ class AudioAnalyzer:
                     }
                 }
             
-            # 1 voice has much lower voice ratio
-            if voice_ratio > 0.5:  # High voice ratio indicates conversation
-                score_contrib = min(0.3, (voice_ratio - 0.5) * 0.6)
+            # Voice ratio analysis with stricter thresholds
+            if voice_ratio > 0.55:  # High voice ratio indicates conversation
+                score_contrib = min(0.35, (voice_ratio - 0.55) * 0.7)
                 multi_speaker_score += score_contrib
                 indicators.append(f"voice_ratio({voice_ratio:.2f})={score_contrib:.2f}")
-            elif voice_ratio < 0.35:  # Low voice ratio strongly suggests single speaker
+            elif voice_ratio < 0.40:  # Low voice ratio strongly suggests single speaker
                 # Strong negative contribution to multi-speaker score
-                multi_speaker_score -= 0.4
-                indicators.append(f"low_voice_ratio({voice_ratio:.2f})=-0.4")
+                multi_speaker_score -= 0.5
+                indicators.append(f"low_voice_ratio({voice_ratio:.2f})=-0.5")
                 
             # Additional penalty for short duration with low voice ratio
-            if total_duration < 15 and voice_ratio < 0.4:
-                multi_speaker_score -= 0.3
-                indicators.append(f"short_monologue(dur={total_duration:.1f})=-0.3")
+            if total_duration < 20 and voice_ratio < 0.45:
+                multi_speaker_score -= 0.4
+                indicators.append(f"short_monologue(dur={total_duration:.1f})=-0.4")
             
-            # 5. Duration check
-            if total_duration > 60 and voice_ratio > 0.6:  # Long conversation
-                multi_speaker_score += 0.2
-                indicators.append(f"long_conversation(dur={total_duration:.1f},ratio={voice_ratio:.2f})=0.2")
+            # 5. Duration check with stricter criteria
+            if total_duration > 60 and voice_ratio > 0.65:  # Long conversation with high voice ratio
+                multi_speaker_score += 0.25
+                indicators.append(f"long_conversation(dur={total_duration:.1f},ratio={voice_ratio:.2f})=0.25")
             
-            # 6. Special case detection
-            if pitch_range > 200 and distance_variance > 1.0 and voice_ratio > 0.4:
+            # 6. Special case detection with stricter thresholds
+            # Very strong multi-speaker indicators
+            if pitch_range > 250 and distance_variance > 1.5 and voice_ratio > 0.45:
                 speaker_count = 2
-                confidence = 0.9
-            # High voice ratio with reasonable duration is strong indicator
-            elif voice_ratio > 0.6 and total_duration > 30:
+                confidence = 0.92
+            # High voice ratio with reasonable duration AND other indicators
+            elif voice_ratio > 0.65 and total_duration > 35 and multi_speaker_score > 0.3:
                 speaker_count = 2
-                confidence = 0.85
-            # Clear single speaker pattern
-            elif voice_ratio < 0.35 and total_duration < 20:
+                confidence = 0.88
+            # Clear single speaker pattern (stricter)
+            elif voice_ratio < 0.40 and (total_duration < 25 or multi_speaker_score < 0.1):
                 speaker_count = 1
-                confidence = 0.85
+                confidence = 0.88
             else:
-                # Determine speaker count based on score
-                # Require positive score AND minimum indicators for 2 speakers
-                if multi_speaker_score >= 0.4 and voice_ratio > 0.35:
+                # Determine speaker count based on score with stricter thresholds
+                # Require higher score AND stronger voice ratio for 2 speakers
+                if multi_speaker_score >= 0.6 and voice_ratio > 0.45:
                     speaker_count = 2
-                    confidence = min(0.9, 0.6 + multi_speaker_score * 0.3)
+                    confidence = min(0.92, 0.65 + multi_speaker_score * 0.3)
+                elif multi_speaker_score >= 0.5 and voice_ratio > 0.55:
+                    # Allow slightly lower score if voice ratio is very high
+                    speaker_count = 2
+                    confidence = min(0.88, 0.6 + multi_speaker_score * 0.35)
                 else:
                     speaker_count = 1  # Default to 1 speaker
                     # For 1 speaker, boost confidence if indicators are low or negative
-                    if multi_speaker_score < 0:
-                        confidence = 0.9  # Very confident it's 1 speaker
-                    elif multi_speaker_score < 0.2:
-                        confidence = 0.8
+                    if multi_speaker_score < -0.2:
+                        confidence = 0.92  # Very confident it's 1 speaker
+                    elif multi_speaker_score < 0:
+                        confidence = 0.88
+                    elif multi_speaker_score < 0.3:
+                        confidence = 0.82
                     else:
-                        confidence = max(0.5, 0.7 - multi_speaker_score * 0.5)
+                        confidence = max(0.6, 0.75 - multi_speaker_score * 0.4)
             
             # Store VAD results for use in analysis if not passed directly
             if vad_info and 'voice_ratio' in vad_info:
@@ -3501,12 +3509,19 @@ class AudioAnalyzer:
                 num_voices = 1
                 speaker_results['confidence'] = 0.5
             
-            # Validate speaker count with VAD results
-            if vad_results['voice_ratio'] < 0.05 and vad_results['num_segments'] < 2:
+            # Validate speaker count with VAD results - stricter validation
+            if vad_results['voice_ratio'] < 0.08 and vad_results['num_segments'] < 3:
                 # Very minimal voice activity - cap at 1 speaker
                 if num_voices > 1:
                     num_voices = 1
                     speaker_results['confidence'] *= 0.7
+            
+            # Additional check: if low multi_speaker_score, override to 1 speaker
+            multi_speaker_score = speaker_results.get('multi_speaker_score', 0)
+            if num_voices == 2 and multi_speaker_score < 0.4:
+                # Not enough evidence for 2 speakers despite initial detection
+                num_voices = 1
+                speaker_results['confidence'] *= 0.75
             
             # QA passes only if exactly 2 voices are detected
             passed_qa = (num_voices == 2)

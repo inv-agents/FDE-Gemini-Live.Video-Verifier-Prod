@@ -1,0 +1,51 @@
+# Optimized Requirements for Better Performance
+# This is an OPTIONAL upgrade path for even better performance
+
+# Computer Vision (optimized versions)
+opencv-python-headless==4.8.1.78
+pytesseract>=0.3.10
+numpy>=1.24.0,<2.0.0
+Pillow>=9.5.0,<11.0.0
+
+# Streamlit Framework
+streamlit>=1.33
+st-gsheets-connection
+streamlit-chunk-file-uploader
+
+# HTTP Requests
+requests>=2.31.0
+
+# Audio Processing
+librosa>=0.10.0,<0.11.0
+SpeechRecognition>=3.10.0
+pydub>=0.25.0,<1.0.0
+
+# OPTION 1: Current Whisper (already optimized to use 'tiny' model)
+openai-whisper>=20231117
+
+# OPTION 2: Faster Whisper (3-4x faster - RECOMMENDED for production)
+# Uncomment this and comment out openai-whisper above to use faster implementation:
+# faster-whisper>=0.10.0
+
+scipy>=1.13.0,<1.14.0
+
+# Google Cloud Services
+google-api-python-client>=2.70.0
+google-auth>=2.20.0
+google-auth-oauthlib>=1.0.0
+google-auth-httplib2>=0.1.0
+google-cloud-storage>=2.10.0
+
+# Utilities
+uuid
+
+# Media Processing
+imageio-ffmpeg
+noisereduce>=3.0.0
+
+# PERFORMANCE NOTES:
+# 1. Current setup now uses Whisper 'tiny' model (10x faster than 'base')
+# 2. For even better performance, switch to faster-whisper (requires code changes)
+# 3. Frame interval increased from 10s to 15s (30% fewer frames to process)
+# 4. Logging reduced to WARNING level (less I/O overhead)
+# 5. Cloud Run resources increased: 8 CPU, 16Gi RAM, 1800s timeout

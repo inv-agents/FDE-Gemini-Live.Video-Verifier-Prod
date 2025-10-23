@@ -369,52 +369,9 @@ class GlobalSidebar:
             </div>
             """, unsafe_allow_html=True)
             
-            GlobalSidebar._render_sidebar_help()
-            
             st.divider()
             
             GlobalSidebar._render_sidebar_session_info()
-
-    @staticmethod
-    @st.cache_data(show_spinner=False)
-    def _render_sidebar_help():
-        """Render simplified help dropdown with quick guide and link to comprehensive help."""
-        help_content = """
-            ### 📋 Quick Start Guide
-            
-            **1. Input Parameters** 📝
-            - Enter authorized **Question ID** and **Alias Email**
-            - Provide **Initial Prompt** used in both conversations
-            - Enter **Agent Email** for submission tracking
-            - Select **Quality Comparison** (Gemini vs Competitor rating)
-            - Upload **two MP4 videos**: **Gemini** and **Competitor** (portrait, 30s+ duration each)
-
-            **2. Video Analysis** 🔍
-            - System analyzes **both videos** independently
-            - Checks for: "2.5 Flash", "Roaring Tiger", "Eval Mode: Native Audio Output" (Gemini video)
-            - Note: Competitor video may show different Eval Mode (e.g., "Server Text-to-Speech")
-            - Analyzes language fluency and voice audibility for both
-            - Review results and screenshots for each video
-
-            **3. Submit Videos** 📤
-            - Pass quality checks to get Google Drive links
-            - Upload both videos to provided folders
-            
-            ### 🎯 Quality Requirements (Gemini Video)
-            - ✅ Use **"2.5 Flash"** (not "2.5 Pro")
-            - ✅ Set alias to **"Roaring Tiger"**
-            - ✅ Enable **"Eval Mode: Native Audio Output"** (Gemini)
-            - ✅ Ensure **both voices audible** (in both videos)
-            - ✅ Speak in **expected language** (in both videos)
-            - ✅ Competitor may use different Eval Mode
-            
-            ---
-            
-            **Need detailed help?** Visit the **Help** page in the sidebar for comprehensive instructions, troubleshooting, and tips.
-            """
-        
-        with st.expander("📖 Quick Guide", expanded=False):
-            st.markdown(help_content)
     
     @staticmethod
     def _render_sidebar_session_info():
