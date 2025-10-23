@@ -109,95 +109,137 @@ class DetectionResult:
 
 
 class TaskVerifier:
-    """Verifies question_id and alias_email inputs."""
+    """Verifies alias_email and agent_email inputs against authorized lists."""
     
     def __init__(self):
         config = ConfigurationManager.get_secure_config()
-        self.SHEET_URL = config["verifier_sheet_url"]
-        self.SHEET_ID = config["verifier_sheet_id"]
-        self.QUESTION_IDS_SHEET = "Question_ID"
+        self.ALIAS_SHEET_URL = config["verifier_sheet_url"]
+        self.ALIAS_SHEET_ID = config["verifier_sheet_id"]
+        self.AGENT_SHEET_URL = config["agent_email_sheet_url"]
+        self.AGENT_SHEET_ID = config["agent_email_sheet_id"]
         self.ALIAS_EMAILS_SHEET = "Alias_Email"
+        self.AGENT_EMAILS_SHEET = "Agent_Email"
     
     @st.cache_resource
     def _get_connection(_self) -> GSheetsConnection:
         """Get or create the GSheetsConnection instance."""
         return st.connection("gsheets", type=GSheetsConnection)
     
-    def verify_inputs(self, question_id: str, alias_email: str) -> Tuple[bool, str]:
-        """Verify if question_id and alias_email are both authorized."""
+    def verify_inputs(self, question_id: str, alias_email: str, agent_email: str) -> Tuple[bool, str]:
+        """Verify if question_id, alias_email, and agent_email are valid."""
         try:
+            # Simple validation for Question ID (not empty)
             if not question_id or not question_id.strip():
                 return False, "Question ID cannot be empty"
             
+            # Validate Alias Email (not empty)
             if not alias_email or not alias_email.strip():
                 return False, "Alias email cannot be empty"
             
+            # Validate Agent Email (not empty)
+            if not agent_email or not agent_email.strip():
+                return False, "Agent email cannot be empty"
+            
             clean_question_id = question_id.strip()
             clean_alias_email = alias_email.strip().lower()
+            clean_agent_email = agent_email.strip().lower()
             
-            return self._check_both_inputs(clean_question_id, clean_alias_email)
+            return self._check_emails(clean_alias_email, clean_agent_email)
 
         except Exception as e:
             logger.error(f"Authorization verification error: {e}")
             return False, f"Authorization check failed: {str(e)}"
     
-    def _check_both_inputs(self, question_id: str, alias_email: str) -> Tuple[bool, str]:
-        """Check if both question_id and alias_email are authorized."""
+    def _check_emails(self, alias_email: str, agent_email: str) -> Tuple[bool, str]:
+        """Check if both alias_email and agent_email are authorized."""
         try:
-            question_ids = self._fetch_sheet_data(self.QUESTION_IDS_SHEET)
-            alias_emails = self._fetch_sheet_data(self.ALIAS_EMAILS_SHEET)
-            
-            if question_id not in question_ids:
-                logger.error(f"❌ Question ID '{question_id}' not found in {len(question_ids)} entries")
-                return False, f"Question ID '{question_id}' not found in authorized list"
+            alias_emails = self._fetch_alias_emails()
+            agent_emails = self._fetch_agent_emails()
             
             if alias_email not in alias_emails:
                 logger.error(f"❌ Alias email '{alias_email}' not found in {len(alias_emails)} entries")
                 return False, f"Alias email '{alias_email}' not found in authorized list"
+            
+            if agent_email not in agent_emails:
+                logger.error(f"❌ Agent email '{agent_email}' not found in {len(agent_emails)} entries")
+                return False, f"Agent email '{agent_email}' not found in authorized list"
                 
-            return True, f"Both Question ID '{question_id}' and email '{alias_email}' are authorized"
+            return True, f"Both Alias email '{alias_email}' and Agent email '{agent_email}' are authorized"
             
         except Exception as e:
-            logger.error(f"Input verification failed: {e}")
-            return False, f"Failed to verify inputs: {str(e)}"
+            logger.error(f"Email verification failed: {e}")
+            return False, f"Failed to verify emails: {str(e)}"
 
     @st.cache_data(ttl=600, show_spinner=False)
-    def _fetch_sheet_data(_self, sheet_name: str) -> Set[str]:
-        """Fetch data from sheet using GSheetsConnection."""
+    def _fetch_alias_emails(_self) -> Set[str]:
+        """Fetch alias emails from the verification sheet."""
         try:
             conn = _self._get_connection()
             df = conn.read(
-                spreadsheet=_self.SHEET_URL,
-                worksheet=sheet_name,
+                spreadsheet=_self.ALIAS_SHEET_URL,
+                worksheet=_self.ALIAS_EMAILS_SHEET,
                 ttl="20m",
                 usecols=None,
                 nrows=None
             )
             
             if df.empty:
-                logger.warning(f"DataFrame is empty for sheet: '{sheet_name}'")
+                logger.warning(f"DataFrame is empty for Alias_Email sheet")
                 return set()
             
-            column_name = sheet_name
+            column_name = _self.ALIAS_EMAILS_SHEET
             
             if column_name not in df.columns:
-                logger.error(f"Expected column '{column_name}' not found in sheet '{sheet_name}'")
+                logger.error(f"Expected column '{column_name}' not found in Alias_Email sheet")
                 return set()
             
-            cleaned_data = set()
-            is_email_sheet = sheet_name == "Alias_Email"
-            
+            cleaned_emails = set()
             for value in df[column_name].dropna():
                 if value and str(value).strip():
-                    clean_value = str(value).strip()
-                    if is_email_sheet:
-                        clean_value = clean_value.lower()
-                    cleaned_data.add(clean_value)
+                    clean_value = str(value).strip().lower()
+                    cleaned_emails.add(clean_value)
             
-            return cleaned_data
+            logger.info(f"Loaded {len(cleaned_emails)} alias emails from sheet")
+            return cleaned_emails
                 
         except Exception as e:
-            logger.error(f"Error fetching {sheet_name} sheet: {e}")
+            logger.error(f"Error fetching Alias_Email sheet: {e}")
+            return set()
+    
+    @st.cache_data(ttl=600, show_spinner=False)
+    def _fetch_agent_emails(_self) -> Set[str]:
+        """Fetch agent emails from the agent email sheet."""
+        try:
+            conn = _self._get_connection()
+            df = conn.read(
+                spreadsheet=_self.AGENT_SHEET_URL,
+                worksheet=_self.AGENT_EMAILS_SHEET,
+                ttl="20m",
+                usecols=None,
+                nrows=None
+            )
+            
+            if df.empty:
+                logger.warning(f"DataFrame is empty for Agent_Email sheet")
+                return set()
+            
+            column_name = _self.AGENT_EMAILS_SHEET
+            
+            if column_name not in df.columns:
+                logger.error(f"Expected column '{column_name}' not found in Agent_Email sheet")
+                return set()
+            
+            cleaned_emails = set()
+            for value in df[column_name].dropna():
+                if value and str(value).strip():
+                    clean_value = str(value).strip().lower()
+                    cleaned_emails.add(clean_value)
+            
+            logger.info(f"Loaded {len(cleaned_emails)} agent emails from sheet")
+            return cleaned_emails
+                
+        except Exception as e:
+            logger.error(f"Error fetching Agent_Email sheet: {e}")
             return set()
 
 
@@ -844,14 +886,15 @@ class InputScreen:
         """Handle the Start Analysis button: authorization, state cleanup and navigation."""
         question_id = st.session_state.question_id.strip()
         alias_email = st.session_state.alias_email.strip()
+        agent_email = st.session_state.agent_email.strip()
         
         st.session_state.selected_language = InputScreen._infer_language_from_question_id(question_id)
         st.session_state.task_type = InputScreen._infer_task_type_from_question_id(question_id)
         
         try:
-            if question_id and alias_email:
+            if question_id and alias_email and agent_email:
                 verifier = InputScreen._get_verifier()
-                is_authorized, auth_message = verifier.verify_inputs(question_id, alias_email)
+                is_authorized, auth_message = verifier.verify_inputs(question_id, alias_email, agent_email)
                 
                 if not is_authorized:
                     st.session_state.analysis_in_progress = False

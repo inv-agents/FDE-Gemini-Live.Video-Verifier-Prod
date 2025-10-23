@@ -1,7 +1,7 @@
 substitutions:
   _REGION: "us-central1"
   _AR_REPO: "apps"
-  _SERVICE: "video-verifier-prod"
+  _SERVICE: "video-verifier"
 
 options:
   logging: CLOUD_LOGGING_ONLY
@@ -30,11 +30,11 @@ steps:
       - "--platform=managed"
       - "--no-allow-unauthenticated"
       - "--port=8080"
-      - "--cpu=4"
-      - "--memory=8Gi"
-      - "--concurrency=80"
-      - "--timeout=300"
-      - "--max-instances=10"
+      - "--cpu=6"
+      - "--memory=10Gi"
+      - "--concurrency=100"
+      - "--timeout=1200"
+      - "--max-instances=20"
       - "--min-instances=0"
       - "--execution-environment=gen2"
       - "--service-account=streamlit-runtime@${PROJECT_ID}.iam.gserviceaccount.com"

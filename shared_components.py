@@ -141,7 +141,9 @@ class ConfigurationManager:
             return {
                 "verifier_sheet_url": google_config["verifier_sheet_url"],
                 "verifier_sheet_id": google_config["verifier_sheet_id"],
-                "verifier_sheet_name": google_config["verifier_sheet_name"]
+                "verifier_sheet_name": google_config["verifier_sheet_name"],
+                "agent_email_sheet_url": google_config.get("agent_email_sheet_url", "https://docs.google.com/spreadsheets/d/1MpSWC9r3VvkiOmA-N-Knf84bdbwPdXAvgU9-v2T1Pyo"),
+                "agent_email_sheet_id": google_config.get("agent_email_sheet_id", "1MpSWC9r3VvkiOmA-N-Knf84bdbwPdXAvgU9-v2T1Pyo")
             }
             
         except KeyError as e:
