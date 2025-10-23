@@ -25,6 +25,7 @@ import numpy as np
 import pytesseract
 import streamlit as st
 from streamlit_gsheets import GSheetsConnection
+from streamlit_chunk_file_uploader import uploader
 
 import librosa
 import speech_recognition as sr
@@ -727,52 +728,54 @@ class InputScreen:
         
         with col1:
             st.markdown("#### Gemini Video *")
-            gemini_video = st.file_uploader(
-                "Upload Gemini's video",
-                type=['mp4'],
+            gemini_video = uploader(
+                "Upload Gemini's video (MP4 format, max 200MB)",
                 key="gemini_video_uploader",
-                help="Upload the video from Gemini (MP4 format, max 200MB)",
-                disabled=st.session_state.get('analysis_in_progress', False),
-                label_visibility="collapsed"
+                chunk_size=31  # 31MB chunks to stay under GCR 32MB limit
             )
             
             if gemini_video and not st.session_state.get('gemini_video_url'):
-                with st.spinner("Uploading Gemini video to cloud..."):
-                    gcs_manager = GoogleCloudStorageManager()
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    filename = f"gemini_{question_id}_{timestamp}.mp4"
-                    url = gcs_manager.upload_video(gemini_video, filename)
-                    if url:
-                        st.session_state.gemini_video_url = url
-                        st.session_state.gemini_video_blob_name = f"videos/{filename}"
-                    else:
-                        st.error("❌ Failed to upload Gemini video")
+                # Check if it's an MP4 file
+                if not gemini_video.name.lower().endswith('.mp4'):
+                    st.error("❌ Please upload an MP4 video file")
+                else:
+                    with st.spinner("Uploading Gemini video to cloud..."):
+                        gcs_manager = GoogleCloudStorageManager()
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        filename = f"gemini_{question_id}_{timestamp}.mp4"
+                        url = gcs_manager.upload_video(gemini_video, filename)
+                        if url:
+                            st.session_state.gemini_video_url = url
+                            st.session_state.gemini_video_blob_name = f"videos/{filename}"
+                        else:
+                            st.error("❌ Failed to upload Gemini video")
             
             if st.session_state.get('gemini_video_url'):
                 st.success("✅ Gemini video ready")
         
         with col2:
             st.markdown("#### Competitor Video *")
-            competitor_video = st.file_uploader(
-                "Upload Competitor's video",
-                type=['mp4'],
+            competitor_video = uploader(
+                "Upload Competitor's video (MP4 format, max 200MB)",
                 key="competitor_video_uploader",
-                help="Upload the video from the competitor (MP4 format, max 200MB)",
-                disabled=st.session_state.get('analysis_in_progress', False),
-                label_visibility="collapsed"
+                chunk_size=31  # 31MB chunks to stay under GCR 32MB limit
             )
             
             if competitor_video and not st.session_state.get('competitor_video_url'):
-                with st.spinner("Uploading Competitor video to cloud..."):
-                    gcs_manager = GoogleCloudStorageManager()
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    filename = f"competitor_{question_id}_{timestamp}.mp4"
-                    url = gcs_manager.upload_video(competitor_video, filename)
-                    if url:
-                        st.session_state.competitor_video_url = url
-                        st.session_state.competitor_video_blob_name = f"videos/{filename}"
-                    else:
-                        st.error("❌ Failed to upload Competitor video")
+                # Check if it's an MP4 file
+                if not competitor_video.name.lower().endswith('.mp4'):
+                    st.error("❌ Please upload an MP4 video file")
+                else:
+                    with st.spinner("Uploading Competitor video to cloud..."):
+                        gcs_manager = GoogleCloudStorageManager()
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        filename = f"competitor_{question_id}_{timestamp}.mp4"
+                        url = gcs_manager.upload_video(competitor_video, filename)
+                        if url:
+                            st.session_state.competitor_video_url = url
+                            st.session_state.competitor_video_blob_name = f"videos/{filename}"
+                        else:
+                            st.error("❌ Failed to upload Competitor video")
             
             if st.session_state.get('competitor_video_url'):
                 st.success("✅ Competitor video ready")

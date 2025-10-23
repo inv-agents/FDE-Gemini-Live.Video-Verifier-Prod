@@ -427,9 +427,9 @@ class GlobalSidebar:
                 <p style="margin: 5px 0; color: #333;"><strong>Question ID:</strong><br>{session_info['question_id']}</p>"""
             
             session_html += f"""
-                <p style="margin: 5px 0; color: #333;"><strong>Email:</strong><br>{session_info['email']}</p>
-                <p style="margin: 5px 0; color: #333;"><strong>Gemini Video:</strong><br><small>{session_info['gemini_video']}</small></p>
-                <p style="margin: 5px 0; color: #333;"><strong>Competitor Video:</strong><br><small>{session_info['competitor_video']}</small></p>
+                <p style="margin: 5px 0; color: #333;"><strong>Agent Email:</strong><br>{session_info.get('agent_email', '')}</p>
+                <p style="margin: 5px 0; color: #333;"><strong>Initial Prompt:</strong><br>{session_info.get('initial_prompt', '')}</p>
+                <p style="margin: 5px 0; color: #333;"><strong>Quality Comparison:</strong><br>{session_info.get('quality_comparison', '')}</p>
                 <p style="margin: 5px 0; color: #333;"><strong>Language:</strong><br>{session_info['language']}</p>
                 <p style="margin: 5px 0; color: #333;"><strong>Task Type:</strong><br>{session_info['task_type']}</p>"""
             
@@ -457,6 +457,9 @@ class GlobalSidebar:
         session_info = {
             'question_id': st.session_state.get('question_id'),
             'email': st.session_state.get('alias_email'),
+            'agent_email': st.session_state.get('agent_email', ''),
+            'initial_prompt': st.session_state.get('initial_prompt', ''),
+            'quality_comparison': st.session_state.get('quality_comparison', ''),
             'gemini_video': gemini_name,
             'competitor_video': competitor_name,
             'language': language_display,
@@ -478,65 +481,67 @@ class GlobalSidebar:
     
     @staticmethod
     def _render_sidebar_analysis_status():
-        """Render analysis status information in sidebar."""
-        if st.session_state.get('analysis_results'):
-            results = st.session_state.analysis_results
-            results_count = len(results)
-            positive_detections = sum(1 for r in results if r.detected)
-            
-            qa_color = "#2196F3"
-            qa_status = "✅ Completed"
-            if st.session_state.get('qa_checker'):
-                qa_summary = st.session_state.qa_checker.get_qa_summary()
-                if qa_summary['passed']:
-                    qa_color = "#4CAF50"
-                    qa_status = "✅ PASS"
-                else:
-                    qa_color = "#f44336"
-                    qa_status = "❌ FAIL"
-            
+        """Render analysis status information in sidebar, split per video (Gemini / Competitor)."""
+        # Only render if we have analysis results
+        gemini_results = st.session_state.get('gemini_analysis_results', []) or []
+        competitor_results = st.session_state.get('competitor_analysis_results', []) or []
+        
+        # Don't render if no results exist
+        if not gemini_results and not competitor_results:
+            return
+        
+        # Render per-video analysis if available
+        def _render_video_section(title: str, title_color: str, results: List[object], qa_checker: Optional[object] = None):
             text_results = [r for r in results if 'Text Detection' in r.rule_name]
             language_results = [r for r in results if 'Language Detection' in r.rule_name]
             voice_results = [r for r in results if 'Voice Audibility' in r.rule_name]
             noise_results = [r for r in results if 'Background Noise' in r.rule_name]
-            
+
             analysis_details = []
-            
+
             flash_results = [r for r in text_results if '2.5 Flash' in r.rule_name]
             alias_results = [r for r in text_results if 'Alias Name' in r.rule_name]
             eval_results = [r for r in text_results if 'Eval Mode' in r.rule_name]
-            
+
             if flash_results:
                 flash_detected = any(r.detected for r in flash_results)
-                flash_qa_info = GlobalSidebar._get_qa_info_for_rule_type('flash_presence')
+                flash_qa_info = None
+                try:
+                    flash_qa_info = GlobalSidebar._get_qa_info_for_rule_type('flash_presence')
+                except Exception:
+                    pass
                 flash_status = "✅" if flash_qa_info and flash_qa_info.get('passed', False) else "❌"
-                
-                if flash_detected:
-                    status_text = "Detected"
-                elif flash_qa_info and flash_qa_info.get('validation_status') == 'incorrect_model':
-                    status_text = "Incorrect Model"
-                else:
-                    status_text = "Not Found"
-                
+                status_text = "Detected" if flash_detected else "Not Found"
                 analysis_details.append(f"<p style=\"margin: 5px 0; color: #333;\"><strong>2.5 Flash:</strong><br>{flash_status} {status_text}</p>")
-            
+
             if alias_results:
                 alias_detected = any(r.detected for r in alias_results)
-                alias_qa_info = GlobalSidebar._get_qa_info_for_rule_type('alias_name_presence')
+                alias_qa_info = None
+                try:
+                    alias_qa_info = GlobalSidebar._get_qa_info_for_rule_type('alias_name_presence')
+                except Exception:
+                    pass
                 alias_status = "✅" if alias_qa_info and alias_qa_info.get('passed', False) else "❌"
                 analysis_details.append(f"<p style=\"margin: 5px 0; color: #333;\"><strong>Alias Name:</strong><br>{alias_status} {'Detected' if alias_detected else 'Not Found'}</p>")
-            
+
             if eval_results:
                 eval_detected = any(r.detected for r in eval_results)
-                eval_qa_info = GlobalSidebar._get_qa_info_for_rule_type('eval_mode_presence')
+                eval_qa_info = None
+                try:
+                    eval_qa_info = GlobalSidebar._get_qa_info_for_rule_type('eval_mode_presence')
+                except Exception:
+                    pass
                 eval_status = "✅" if eval_qa_info and eval_qa_info.get('passed', False) else "❌"
                 analysis_details.append(f"<p style=\"margin: 5px 0; color: #333;\"><strong>Eval Mode:</strong><br>{eval_status} {'Detected' if eval_detected else 'Not Found'}</p>")
-            
+
             if language_results:
                 language_result = language_results[0]
-                language_qa_info = GlobalSidebar._get_qa_info_for_rule_type('language_fluency')
+                language_qa_info = None
+                try:
+                    language_qa_info = GlobalSidebar._get_qa_info_for_rule_type('language_fluency')
+                except Exception:
+                    pass
                 language_status = "✅" if language_qa_info and language_qa_info.get('passed', False) else "❌"
-                
                 if language_result.details and 'analysis_failed_reason' in language_result.details:
                     analysis_details.append(f"<p style=\"margin: 5px 0; color: #333;\"><strong>Language Fluency:</strong><br>{language_status} No Voices Detected</p>")
                 else:
@@ -545,28 +550,31 @@ class GlobalSidebar:
                     if detected_lang != 'unknown':
                         locale_format = Config.whisper_language_to_locale(detected_lang, target_lang)
                         display_name = Config.get_language_display_name(locale_format)
-
-                        if display_name is None:
-                            display_name = detected_lang if detected_lang else "Unknown"
                         analysis_details.append(f"<p style=\"margin: 5px 0; color: #333;\"><strong>Language Fluency:</strong><br>{language_status} {display_name}</p>")
                     else:
                         analysis_details.append(f"<p style=\"margin: 5px 0; color: #333;\"><strong>Language Fluency:</strong><br>{language_status} Unknown</p>")
-            
+
             if voice_results:
                 voice_result = voice_results[0]
-                voice_qa_info = GlobalSidebar._get_qa_info_for_rule_type('voice_audibility')
+                voice_qa_info = None
+                try:
+                    voice_qa_info = GlobalSidebar._get_qa_info_for_rule_type('voice_audibility')
+                except Exception:
+                    pass
                 voice_status = "✅" if voice_qa_info and voice_qa_info.get('passed', False) else "❌"
-                
                 if voice_result.details:
                     num_voices = voice_result.details.get('num_audible_voices', 0)
                     analysis_details.append(f"<p style=\"margin: 5px 0; color: #333;\"><strong>Voice Audibility:</strong><br>{voice_status} {num_voices} Voice{'s' if num_voices != 1 else ''}</p>")
                 else:
                     analysis_details.append(f"<p style=\"margin: 5px 0; color: #333;\"><strong>Voice Audibility:</strong><br>{voice_status} Unknown</p>")
 
-            noise_qa_info = GlobalSidebar._get_qa_info_for_rule_type('background_noise') if st.session_state.get('qa_checker') else None
+            noise_qa_info = None
+            try:
+                noise_qa_info = GlobalSidebar._get_qa_info_for_rule_type('background_noise') if st.session_state.get('qa_checker') else None
+            except Exception:
+                noise_qa_info = None
             if noise_qa_info or noise_results:
                 noise_status = "✅" if noise_qa_info and noise_qa_info.get('passed', False) else "❌"
-
                 level_source = None
                 if noise_qa_info and isinstance(noise_qa_info.get('noise_level'), str):
                     level_source = noise_qa_info.get('noise_level')
@@ -574,40 +582,30 @@ class GlobalSidebar:
                     noise_result = noise_results[0]
                     if noise_result.details and isinstance(noise_result.details.get('noise_level'), str):
                         level_source = noise_result.details.get('noise_level')
-
                 if isinstance(level_source, str) and level_source.strip():
                     noise_level = level_source.strip().split()[0].capitalize()
                 else:
                     noise_level = "Unknown"
+                analysis_details.append(f"<p style=\"margin: 5px 0; color: #333;\"><strong>Background Noise:</strong><br>{noise_status} {noise_level}</p>")
 
-                analysis_details.append(
-                    f"<p style=\"margin: 5px 0; color: #333;\"><strong>Background Noise:</strong><br>{noise_status} {noise_level}</p>"
-                )
-            
             details_html = "".join(analysis_details) if analysis_details else "<p style=\"margin: 5px 0; color: #333;\">No detailed analysis available</p>"
-            
-            total_analysis_time = GlobalSidebar._get_total_analysis_time_for_sidebar()
-            if total_analysis_time > 0:
-                details_html += f"<p style=\"margin: 5px 0; color: #333;\"><strong>Analysis Time:</strong><br>⏱️ {total_analysis_time:.2f} seconds</p>"
-            
-            if qa_status == "✅ PASS":
-                bg_gradient = "linear-gradient(135deg, #e8f5e8 0%, #f0f8f0 100%)"
-                header_color = "#2e7d32"
-            elif qa_status == "❌ FAIL":
-                bg_gradient = "linear-gradient(135deg, #ffebee 0%, #fce4ec 100%)"
-                header_color = "#c62828"
-            else:
-                bg_gradient = "linear-gradient(135deg, #e3f2fd 0%, #f0f8ff 100%)"
-                header_color = "#1565C0"
-            
-            st.markdown("### 📊 Analysis Report")
-            
-            st.markdown(f"""
-            <div style="background: {bg_gradient}; padding: 15px; border-radius: 8px; border-left: 4px solid {qa_color}; margin-bottom: 15px;">
-                <h4 style="margin: 0 0 10px 0; color: {header_color};">Overall Status: {qa_status}</h4>
-                {details_html}
-            </div>
-            """, unsafe_allow_html=True)
+            return f"<h4 style=\"margin: 8px 0; color: {title_color}; font-weight: bold;\">{title}</h4>" + details_html
+
+        gemini_html = _render_video_section('🔵 Gemini', '#1565C0', gemini_results)
+        competitor_html = _render_video_section('🔴 Competitor', '#c62828', competitor_results)
+
+        total_analysis_time = GlobalSidebar._get_total_analysis_time_for_sidebar()
+        time_html = f"<p style=\"margin: 5px 0; color: #333;\"><strong>Analysis Time:</strong><br>⏱️ {total_analysis_time:.2f} seconds</p>" if total_analysis_time > 0 else ""
+
+        st.markdown("### 📊 Analysis Report")
+        st.markdown(f"""
+        <div style="background: linear-gradient(135deg, #e3f2fd 0%, #f0f8ff 100%); padding: 15px; border-radius: 8px; margin-bottom: 15px;">
+            {gemini_html}
+            <hr style="border: 1px solid #ccc; margin: 10px 0;"/>
+            {competitor_html}
+            {time_html}
+        </div>
+        """, unsafe_allow_html=True)
     
     @staticmethod
     def _get_qa_info_for_rule_type(rule_type: str):
